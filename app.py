@@ -7,7 +7,7 @@ import os, re, glob, json, base64, datetime, urllib.request
 from urllib.parse import quote
 
 # ==============================================================================
-# 1. KONFIGURASI HALAMAN UTAMA & SESSION STATE LOGIN / TEMA
+# 1. KONFIGURASI HALAMAN UTAMA & SESSION STATE
 # ==============================================================================
 st.set_page_config(
     page_title="AmalQu — Yayasan AmalQu Indonesia Peduli",
@@ -17,33 +17,69 @@ st.set_page_config(
 )
 
 if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
+    st.session_state.dark_mode = True
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
 
 def render_html(raw_html: str):
-    """Merender HTML bersih tanpa spasi indentasi berlebih agar tidak menjadi code block."""
     cleaned = " ".join(line.strip() for line in raw_html.splitlines() if line.strip())
     st.markdown(cleaned, unsafe_allow_html=True)
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def resolve_ibb_logo(page_url: str) -> str:
-    """Mengekstrak direct image URL otomatis dari tautan ImgBB https://ibb.co.com/W4RG2Dpv."""
-    try:
-        req = urllib.request.Request(page_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            html_text = resp.read().decode('utf-8', errors='ignore')
-        m = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
-        if not m:
-            m = re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image["\']', html_text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-    except:
-        pass
+def get_logo_data_uri() -> str:
+    """Mengambil logo dari ImgBB via server & mengubahnya ke Base64 agar bebas blokir ISP Indonesia."""
+    candidates = ["https://ibb.co.com/W4RG2Dpv", "https://ibb.co/W4RG2Dpv"]
+    img_url = None
+    for page_url in candidates:
+        try:
+            req = urllib.request.Request(page_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                html_text = resp.read().decode('utf-8', errors='ignore')
+            m = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+            if not m:
+                m = re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image["\']', html_text, re.IGNORECASE)
+            if m:
+                img_url = m.group(1).split("?")[0]
+                break
+        except:
+            continue
+
+    if img_url:
+        for test_img_url in [img_url, img_url.replace("i.ibb.co/", "i.ibb.co.com/")]:
+            try:
+                req_img = urllib.request.Request(test_img_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req_img, timeout=6) as r_img:
+                    raw_bytes = r_img.read()
+                    if len(raw_bytes) > 500:
+                        b64_img = base64.b64encode(raw_bytes).decode('utf-8')
+                        mime = "image/png" if test_img_url.lower().endswith(".png") else "image/jpeg"
+                        return f"data:{mime};base64,{b64_img}"
+            except:
+                continue
     return ""
 
-LOGO_IBB_PAGE = "https://ibb.co.com/W4RG2Dpv"
-DIRECT_LOGO_URL = resolve_ibb_logo(LOGO_IBB_PAGE)
+LOGO_DATA_URI = get_logo_data_uri()
+
+def build_logo_html(size_px=44):
+    """Merender logo dengan fallback SVG otomatis sehingga tidak pernah muncul ikon gambar pecah."""
+    svg_fallback = (
+        f'<div style="width:{size_px}px; height:{size_px}px; border-radius:12px; '
+        f'background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); '
+        f'display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; '
+        f'box-shadow:0 4px 14px rgba(249,115,22,0.3);">'
+        f'<svg width="{int(size_px*0.56)}" height="{int(size_px*0.56)}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+        f'<path d="M12 2L3 7V12C3 17.55 6.84 22.74 12 24C17.16 22.74 21 17.55 21 12V7L12 2ZM12 6.5C13.93 6.5 15.5 8.07 15.5 10C15.5 11.93 13.93 13.5 12 13.5C10.07 13.5 8.5 11.93 8.5 10C8.5 8.07 10.07 6.5 12 6.5ZM18 17.5C16.5 19.3 14.3 20.5 12 20.5C9.7 20.5 7.5 19.3 6 17.5C6.5 15.8 9.8 14.8 12 14.8C14.2 14.8 17.5 15.8 18 17.5Z" fill="white"/>'
+        f'</svg></div>'
+    )
+    if LOGO_DATA_URI:
+        return (
+            f'<div style="position:relative; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;">'
+            f'<img src="{LOGO_DATA_URI}" style="width:{size_px}px; height:{size_px}px; border-radius:12px; object-fit:contain; background:#FFFFFF; padding:4px; border:1px solid var(--border-soft); box-shadow:0 4px 12px rgba(0,0,0,0.08);" '
+            f'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'inline-flex\';" alt="AmalQu">'
+            f'<div style="display:none; width:{size_px}px; height:{size_px}px; border-radius:12px; background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); align-items:center; justify-content:center;">'
+            f'<span style="color:#FFF; font-weight:800; font-size:{int(size_px*0.45)}px;">A</span></div></div>'
+        )
+    return svg_fallback
 
 # ==============================================================================
 # 2. REGISTRY 4 USER LOGIN (RBAC) & 16 LINK SPREADSHEET OTOMATIS
@@ -107,7 +143,7 @@ def build_gsheet_url(key_name, sheet_name=None):
     return f"{base}/export?format=csv&gid={gid}"
 
 # ==============================================================================
-# 3. DYNAMIC CSS INJECTION (AUTO-RESPONSIVE MOBILE/DESKTOP + DUAL THEME)
+# 3. PRECISION CSS SYSTEM (ANTI "VISIBILI", ANTI RADIO DOTS, EQUAL BENTO HEIGHT)
 # ==============================================================================
 is_dark = st.session_state.dark_mode
 
@@ -116,7 +152,7 @@ if is_dark:
     :root {
         --bg-main: #0B0F19;
         --bg-card: #111827;
-        --bg-subcard: #1E293B;
+        --bg-subcard: #1A2333;
         --bg-input: #1E293B;
         --text-primary: #F8FAFC;
         --text-secondary: #CBD5E1;
@@ -138,7 +174,7 @@ else:
         --bg-input: #FFFFFF;
         --text-primary: #0F172A;
         --text-secondary: #475569;
-        --text-muted: #94A3B8;
+        --text-muted: #64748B;
         --border-soft: #E2E8F0;
         --border-strong: #CBD5E1;
         --table-head: #F8FAFC;
@@ -161,14 +197,22 @@ render_html(f"""
 {css_vars}
 {hide_sidebar_css}
 
+/* Sembunyikan Footer & Toolbar Bawaan Streamlit */
+footer, [data-testid="stFooter"], [data-testid="stStatusWidget"] {{
+    display: none !important;
+}}
+[data-testid="stHeader"] {{
+    background-color: transparent !important;
+    height: 2rem !important;
+}}
+
 .stApp, [data-testid="stAppViewContainer"] {{
     background-color: var(--bg-main) !important;
     color: var(--text-primary) !important;
 }}
-[data-testid="stHeader"] {{
-    background-color: transparent !important;
-}}
-body, p, span, div, label, input, button, th, td, li {{
+
+/* Terapkan Font Modern TANPA Merusak Material Icons ("visibili" Fix) */
+body, p, label, input, th, td, li {{
     font-family: 'Plus Jakarta Sans', -apple-system, sans-serif !important;
     color: var(--text-primary);
 }}
@@ -176,15 +220,19 @@ h1, h2, h3, h4, h5, h6, .metric-num, .brand-title {{
     font-family: 'Outfit', sans-serif !important;
     color: var(--text-primary) !important;
 }}
-.brand-sub {{ color: var(--text-secondary) !important; }}
+[data-testid="stIconMaterial"], .material-symbols-rounded, span[translate="no"] {{
+    font-family: 'Material Symbols Rounded' !important;
+    font-weight: normal !important;
+    font-style: normal !important;
+}}
 i[class^="ri-"], i[class*=" ri-"] {{
     font-family: 'remixicon' !important;
     font-style: normal !important;
 }}
 
 .block-container {{
-    padding-top: 2.2rem !important;
-    padding-bottom: 2.5rem !important;
+    padding-top: 1.2rem !important;
+    padding-bottom: 2rem !important;
     max-width: 1440px !important;
 }}
 
@@ -192,54 +240,57 @@ i[class^="ri-"], i[class*=" ri-"] {{
 section[data-testid="stSidebar"] {{
     background-color: var(--bg-card) !important;
     border-right: 1px solid var(--border-soft) !important;
-}}
-section[data-testid="stSidebar"] * {{
-    color: var(--text-primary);
+    width: 265px !important;
 }}
 .sub-box {{
     background: var(--bg-subcard);
     border: 1px solid var(--border-soft);
 }}
 
-/* Sidebar Navigation Pills */
+/* Hapus Bulatan Radio Button 100% di Semua Versi Streamlit */
 section[data-testid="stSidebar"] div[role="radiogroup"] {{
     gap: 6px !important;
     display: flex !important;
     flex-direction: column !important;
 }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label {{
+section[data-testid="stSidebar"] label[data-baseweb="radio"] {{
     background: transparent !important;
     border: 1px solid transparent !important;
     border-radius: 12px !important;
-    padding: 10px 14px !important;
+    padding: 11px 16px !important;
     margin: 0 !important;
     cursor: pointer !important;
     width: 100% !important;
+    transition: all 0.15s ease !important;
 }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{
+section[data-testid="stSidebar"] label[data-baseweb="radio"] > div:not([data-testid="stMarkdownContainer"]),
+section[data-testid="stSidebar"] label[data-baseweb="radio"] input {{
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover {{
     background: var(--bg-subcard) !important;
     border-color: var(--border-soft) !important;
 }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child {{
-    display: none !important;
-}}
-section[data-testid="stSidebar"] div[role="radiogroup"] label p {{
+section[data-testid="stSidebar"] label[data-baseweb="radio"] p {{
     font-size: 13.5px !important;
     font-weight: 600 !important;
     color: var(--text-secondary) !important;
     margin: 0 !important;
 }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {{
     background: linear-gradient(135deg, #FF6B4A 0%, #F97316 100%) !important;
     box-shadow: 0 6px 16px rgba(249, 115, 22, 0.28) !important;
 }}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p,
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) span {{
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p {{
     color: #FFFFFF !important;
     font-weight: 700 !important;
 }}
 
-/* Segmented Radio Switcher di Main Content */
+/* Segmented Radio Switcher di Main Content (Tanpa Bulatan Radio) */
 div[data-testid="stMainBlockContainer"] div[role="radiogroup"] {{
     background: var(--bg-subcard) !important;
     padding: 5px !important;
@@ -249,26 +300,29 @@ div[data-testid="stMainBlockContainer"] div[role="radiogroup"] {{
     gap: 6px !important;
     border: 1px solid var(--border-soft) !important;
 }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] label {{
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] {{
     background: transparent !important;
     padding: 7px 14px !important;
     border-radius: 9px !important;
     cursor: pointer !important;
+    margin: 0 !important;
 }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] label > div:first-child {{
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] > div:not([data-testid="stMarkdownContainer"]),
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] input {{
     display: none !important;
 }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] label p {{
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] p {{
     font-size: 12.5px !important;
     font-weight: 600 !important;
     color: var(--text-secondary) !important;
+    margin: 0 !important;
 }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] label:has(input:checked) {{
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked) {{
     background: var(--bg-card) !important;
     border: 1px solid var(--border-strong) !important;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
 }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] label:has(input:checked) p {{
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked) p {{
     color: #FF6B4A !important;
     font-weight: 700 !important;
 }}
@@ -287,6 +341,11 @@ div[data-baseweb="input"] input,
 div[data-testid="stWidgetLabel"] p {{
     color: var(--text-primary) !important;
     font-weight: 600 !important;
+    font-size: 13px !important;
+}}
+div[data-baseweb="input"] input::placeholder {{
+    color: var(--text-muted) !important;
+    opacity: 0.75 !important;
     font-size: 12.5px !important;
 }}
 div[data-baseweb="popover"],
@@ -298,77 +357,92 @@ li[role="option"] {{
 li[role="option"]:hover {{
     background-color: var(--bg-subcard) !important;
 }}
-button[kind="primary"], button[kind="secondary"], [data-testid="stDownloadButton"] button, [data-testid="stFormSubmitButton"] button {{
+button[kind="primary"], button[kind="secondary"], [data-testid="stDownloadButton"] button {{
     background: var(--bg-card) !important;
     color: var(--text-primary) !important;
     border: 1px solid var(--border-strong) !important;
     border-radius: 12px !important;
     font-weight: 700 !important;
     padding: 8px 14px !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05) !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04) !important;
 }}
 [data-testid="stFormSubmitButton"] button {{
     background: linear-gradient(135deg, #FF6B4A 0%, #F97316 100%) !important;
     color: #FFFFFF !important;
     border: none !important;
-    padding: 10px 18px !important;
+    border-radius: 12px !important;
+    padding: 11px 18px !important;
     box-shadow: 0 6px 16px rgba(249, 115, 22, 0.3) !important;
 }}
 [data-testid="stFormSubmitButton"] button p {{
     color: #FFFFFF !important;
     font-weight: 700 !important;
+    font-size: 14px !important;
 }}
 button[kind="primary"]:hover, button[kind="secondary"]:hover, [data-testid="stDownloadButton"] button:hover {{
     border-color: #FF6B4A !important;
     color: #FF6B4A !important;
 }}
 
-/* Bento Cards & Chart Containers */
+/* Bento Cards (Tinggi Seragam & Presisi) */
 .bento-card, [data-testid="stForm"] {{
     background: var(--bg-card) !important;
     border: 1px solid var(--border-soft) !important;
     border-radius: 18px !important;
     padding: 18px 20px !important;
-    box-shadow: 0 4px 18px -2px rgba(0, 0, 0, 0.04) !important;
+    box-shadow: 0 4px 18px -2px rgba(0, 0, 0, 0.05) !important;
     margin-bottom: 14px !important;
 }}
-.chart-header-box {{
-    background: var(--bg-card);
-    border: 1px solid var(--border-soft);
-    border-bottom: none;
-    border-radius: 18px 18px 0 0;
-    padding: 16px 20px 6px 20px;
-    margin-bottom: -14px;
-    position: relative;
-    z-index: 2;
-}}
-[data-testid="stPlotlyChart"] {{
-    background: var(--bg-card) !important;
-    border: 1px solid var(--border-soft) !important;
-    border-radius: 18px !important;
-    padding: 8px 12px 6px 12px !important;
-    box-shadow: 0 4px 18px -2px rgba(0, 0, 0, 0.04) !important;
-    margin-bottom: 14px !important;
+.kpi-uniform {{
+    height: 148px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
 }}
 .hero-card {{
     background: linear-gradient(135deg, #4F46E5 0%, #6366F1 55%, #8B5CF6 100%);
     border-radius: 18px;
     padding: 18px 20px;
+    height: 148px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
     color: #FFFFFF !important;
     box-shadow: 0 10px 24px -6px rgba(79, 70, 229, 0.4);
     margin-bottom: 14px;
 }}
 .hero-card * {{ color: #FFFFFF !important; }}
 
+/* Chart Box Tanpa Garis Patah */
+.chart-header-box {{
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-bottom: none;
+    border-radius: 18px 18px 0 0;
+    padding: 16px 20px 8px 20px;
+    margin-bottom: -16px;
+    position: relative;
+    z-index: 2;
+}}
+[data-testid="stPlotlyChart"] {{
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-soft) !important;
+    border-top: none !important;
+    border-radius: 0 0 18px 18px !important;
+    padding: 4px 12px 8px 12px !important;
+    box-shadow: 0 4px 18px -2px rgba(0, 0, 0, 0.05) !important;
+    margin-bottom: 14px !important;
+}}
+
 /* Icon Box & Status Badges */
 .icon-box {{
     width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
     display: inline-flex; align-items: center; justify-content: center; font-size: 17px;
 }}
-.ib-indigo {{ background: rgba(79, 70, 229, 0.14); color: #6366F1 !important; }}
-.ib-orange {{ background: rgba(249, 115, 22, 0.14); color: #F97316 !important; }}
-.ib-emerald {{ background: rgba(16, 185, 129, 0.14); color: #10B981 !important; }}
-.ib-rose {{ background: rgba(239, 68, 68, 0.14); color: #EF4444 !important; }}
+.ib-indigo {{ background: rgba(79, 70, 229, 0.15); color: #6366F1 !important; }}
+.ib-orange {{ background: rgba(249, 115, 22, 0.15); color: #F97316 !important; }}
+.ib-emerald {{ background: rgba(16, 185, 129, 0.15); color: #10B981 !important; }}
+.ib-rose {{ background: rgba(239, 68, 68, 0.15); color: #EF4444 !important; }}
 
 .badge-pill {{
     font-size: 11px; font-weight: 700; padding: 4px 10px;
@@ -379,6 +453,11 @@ button[kind="primary"]:hover, button[kind="secondary"]:hover, [data-testid="stDo
 .bp-red {{ background: rgba(239, 68, 68, 0.16); color: #EF4444 !important; }}
 .bp-orange {{ background: rgba(249, 115, 22, 0.16); color: #F97316 !important; }}
 .bp-indigo {{ background: rgba(79, 70, 229, 0.16); color: #6366F1 !important; }}
+
+.nowrap-val {{
+    white-space: nowrap !important;
+    font-weight: 700;
+}}
 
 /* Custom Clean SaaS Table */
 .saas-table-wrap {{
@@ -442,7 +521,7 @@ button[kind="primary"]:hover, button[kind="secondary"]:hover, [data-testid="stDo
     .block-container {{
         padding-left: 12px !important;
         padding-right: 12px !important;
-        padding-top: 3.2rem !important;
+        padding-top: 2.8rem !important;
     }}
     div[data-testid="stHorizontalBlock"] {{
         flex-wrap: wrap !important;
@@ -452,12 +531,9 @@ button[kind="primary"]:hover, button[kind="secondary"]:hover, [data-testid="stDo
         flex: 1 1 100% !important;
         min-width: 100% !important;
     }}
-    .bento-card, .hero-card {{
-        padding: 15px 16px !important;
-        border-radius: 16px !important;
-    }}
-    .metric-num {{
-        font-size: 22px !important;
+    .kpi-uniform, .hero-card {{
+        height: auto !important;
+        min-height: 132px !important;
     }}
     .cal-desktop-only {{ display: none !important; }}
     .cal-mobile-only {{ display: block !important; }}
@@ -466,48 +542,42 @@ button[kind="primary"]:hover, button[kind="secondary"]:hover, [data-testid="stDo
 """)
 
 # ==============================================================================
-# 4. HALAMAN GERBANG LOGIN (JIKA USER BELUM LOGIN)
+# 4. HALAMAN GERBANG LOGIN (PRESISI, LOGO TAMPIL SEMPURNA & BEBAS BUG "VISIBILI")
 # ==============================================================================
-if DIRECT_LOGO_URL:
-    brand_logo_big = f'<img src="{DIRECT_LOGO_URL}" style="width:68px; height:68px; border-radius:16px; object-fit:contain; background:#FFFFFF; padding:6px; box-shadow:0 8px 20px rgba(0,0,0,0.08); margin-bottom:12px;" alt="AmalQu">'
-else:
-    brand_logo_big = (
-        '<div style="width:68px; height:68px; border-radius:16px; background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); '
-        'display:inline-flex; align-items:center; justify-content:center; box-shadow:0 8px 20px rgba(249,115,22,0.3); margin-bottom:12px;">'
-        '<i class="ri-hand-heart-fill" style="color:#FFFFFF !important; font-size:34px;"></i></div>'
-    )
-
 if st.session_state.auth_user is None:
-    top_sp1, top_sp2 = st.columns([6, 1])
+    top_sp1, top_sp2 = st.columns([8.5, 1])
     with top_sp2:
-        theme_icon_login = "☀️" if is_dark else "🌙"
-        if st.button(theme_icon_login, key="login_theme_btn", help="Ubah Mode Terang / Gelap"):
+        theme_lbl = "☀️ Terang" if is_dark else "🌙 Gelap"
+        if st.button(theme_lbl, key="login_theme_btn", use_container_width=True):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
 
-    _, login_col, _ = st.columns([1.2, 1.4, 1.2])
+    _, login_col, _ = st.columns([1.3, 1.4, 1.3])
     with login_col:
         render_html(f"""
-        <div style="text-align:center; margin-top:24px; margin-bottom:16px;">
-            {brand_logo_big}
-            <div style="font-family:'Outfit',sans-serif !important; font-size:28px; font-weight:800; letter-spacing:-0.5px;">AmalQu</div>
-            <div style="font-size:13.5px; font-weight:600; color:var(--text-secondary) !important; margin-top:2px;">
-                Yayasan AmalQu Indonesia Peduli • Enterprise Command Center
+        <div style="text-align:center; margin-top:16px; margin-bottom:18px;">
+            <div style="margin-bottom:12px;">{build_logo_html(68)}</div>
+            <div style="font-family:'Outfit',sans-serif !important; font-size:30px; font-weight:800; letter-spacing:-0.5px;">AmalQu</div>
+            <div style="font-size:13px; font-weight:600; color:var(--text-secondary) !important; margin-top:4px;">
+                Yayasan AmalQu Indonesia Peduli • Command Center
             </div>
         </div>
         """)
 
         with st.form("amalqu_login_form", clear_on_submit=False):
             render_html("""
-            <div style="font-family:'Outfit',sans-serif !important; font-size:17px; font-weight:700; margin-bottom:4px; text-align:center;">
-                <i class="ri-shield-keyhole-line" style="color:#FF6B4A !important;"></i> Portal Akses Resmi
-            </div>
-            <div style="font-size:12px; color:var(--text-muted) !important; text-align:center; margin-bottom:14px;">
-                Masukkan ID Pengguna dan Password divisi Anda untuk melanjutkan
+            <div style="text-align:center; margin-bottom:14px;">
+                <div style="font-family:'Outfit',sans-serif !important; font-size:17px; font-weight:700;">
+                    <i class="ri-shield-keyhole-line" style="color:#FF6B4A !important;"></i> Portal Akses Resmi Divisi
+                </div>
+                <div style="font-size:12px; color:var(--text-muted) !important; margin-top:2px;">
+                    Silakan masuk menggunakan ID dan Password divisi Anda
+                </div>
             </div>
             """)
-            inp_user = st.text_input("ID Pengguna (Username)", placeholder="Masukkan ID (Contoh: Amalqu / Finance / Advertiser / Warehouse)")
-            inp_pass = st.text_input("Password", type="password", placeholder="Masukkan Password")
+            inp_user = st.text_input("ID Pengguna (Username)", placeholder="Ketik ID: Amalqu / Finance / Advertiser / Warehouse")
+            inp_pass = st.text_input("Password", type="password", placeholder="Ketik Password Divisi Anda")
+            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
             submit_login = st.form_submit_button("Masuk ke Command Center", use_container_width=True)
 
             if submit_login:
@@ -518,16 +588,15 @@ if st.session_state.auth_user is None:
                     st.session_state.auth_user = auth_reg[u_clean]
                     st.rerun()
                 else:
-                    st.error("ID Pengguna atau Password tidak sesuai. Silakan periksa kembali huruf besar/kecil password Anda.")
+                    st.error("ID Pengguna atau Password salah. Pastikan huruf besar/kecil sesuai.")
 
         render_html("""
-        <div style="text-align:center; font-size:11.5px; color:var(--text-muted) !important; margin-top:14px;">
-            <i class="ri-lock-2-line"></i> Sistem Keamanan Terenkripsi • Hak Akses Berbasis Divisi (RBAC)
+        <div style="text-align:center; font-size:11.5px; color:var(--text-muted) !important; margin-top:12px;">
+            <i class="ri-lock-2-line"></i> Koneksi Terenkripsi • Role-Based Access Control (RBAC)
         </div>
         """)
     st.stop()
 
-# Ambil profil user yang sedang aktif
 current_user = st.session_state.auth_user
 user_role = current_user.get("role", "Admin")
 allowed_menus = current_user.get("menus", ["Dashboard Overview"])
@@ -968,7 +1037,6 @@ def load_all_realtime_data():
             if not t_kal_aj.empty:
                 db['kalender_okt'] = t_kal_aj
 
-    # KALKULASI PEMISAHAN STOK SIAP SALUR VS BELUM STIKER & SINKRONISASI JADWAL DISTRIBUSI
     df_ms = db['master_stok_rt']
     df_kal = db['kalender_okt']
 
@@ -1116,21 +1184,12 @@ df_macro = db['macro_monthly']
 sa = db['stok_audit']
 
 # ==============================================================================
-# 7. SIDEBAR NAVIGASI SESUAI HAK AKSES ROLE USER
+# 7. SIDEBAR NAVIGASI (BEBAS BULATAN RADIO & LOGO TAMPIL SEMPURNA)
 # ==============================================================================
-if DIRECT_LOGO_URL:
-    logo_sidebar_html = f'<img src="{DIRECT_LOGO_URL}" style="width:44px; height:44px; border-radius:12px; object-fit:contain; background:#FFFFFF; padding:3px; box-shadow:0 4px 12px rgba(0,0,0,0.08);" alt="AmalQu">'
-else:
-    logo_sidebar_html = (
-        '<div style="width:44px; height:44px; border-radius:12px; background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); '
-        'display:flex; align-items:center; justify-content:center; box-shadow:0 4px 12px rgba(249,115,22,0.3);">'
-        '<i class="ri-hand-heart-fill" style="color:#FFFFFF !important; font-size:24px;"></i></div>'
-    )
-
 with st.sidebar:
     render_html(f"""
     <div style="display:flex; align-items:center; gap:12px; padding:4px 4px 18px 4px; border-bottom:1px solid var(--border-soft); margin-bottom:14px;">
-        {logo_sidebar_html}
+        {build_logo_html(44)}
         <div>
             <div class="brand-title" style="font-family:'Outfit',sans-serif !important; font-weight:800; font-size:21px; line-height:1.15; letter-spacing:-0.3px;">AmalQu</div>
             <div class="brand-sub" style="font-size:11px; font-weight:600; line-height:1.3; margin-top:2px;">Yayasan AmalQu Indonesia Peduli</div>
@@ -1148,12 +1207,12 @@ with st.sidebar:
     )
 
     render_html(f"""
-    <div class="sub-box" style="margin-top:20px; padding:13px; border-radius:14px;">
+    <div class="sub-box" style="margin-top:20px; padding:13px 14px; border-radius:14px;">
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-            <i class="ri-shield-user-line" style="color:#4F46E5 !important; font-size:16px;"></i>
-            <span style="font-size:12px; font-weight:700;">Login: {current_user['username_display']}</span>
+            <i class="ri-shield-user-line" style="color:#6366F1 !important; font-size:16px;"></i>
+            <span style="font-size:12.5px; font-weight:700;">{current_user['username_display']} ({user_role})</span>
         </div>
-        <div style="font-size:11px; opacity:0.82; line-height:1.4;">
+        <div style="font-size:11px; color:var(--text-secondary) !important; line-height:1.45;">
             {current_user['title']}<br>
             <span style="color:#10B981 !important; font-weight:700;">● Live Sync 16 Sheets ({db['last_sync']})</span>
         </div>
@@ -1162,35 +1221,35 @@ with st.sidebar:
 
     sb_col1, sb_col2 = st.columns(2)
     with sb_col1:
-        if st.button("🔄 Sync", use_container_width=True, help="Sinkronkan Data Sekarang"):
+        if st.button("Sync Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
     with sb_col2:
-        if st.button("🚪 Keluar", use_container_width=True, help="Keluar dari Akun Ini"):
+        if st.button("Logout", use_container_width=True):
             st.session_state.auth_user = None
             st.rerun()
 
 # ==============================================================================
-# 8. UI HELPER COMPONENTS
+# 8. UI HELPER COMPONENTS (KPI UNIFORM HEIGHT, CHART HEADER, TABLE)
 # ==============================================================================
 def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_theme="green", subtext=""):
     ib_map = {"indigo": "ib-indigo", "orange": "ib-orange", "emerald": "ib-emerald", "rose": "ib-rose"}
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
     arrow_ic = "ri-arrow-right-up-line" if badge_theme in ["green", "indigo"] else ("ri-alert-line" if badge_theme == "red" else "ri-information-line")
     render_html(f"""
-    <div class="bento-card">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; margin-bottom:10px;">
-            <span style="font-size:12.5px; font-weight:600; color:var(--text-secondary) !important; line-height:1.3;">{title}</span>
+    <div class="bento-card kpi-uniform">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+            <span style="font-size:12.5px; font-weight:600; color:var(--text-secondary) !important; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{title}</span>
             <div class="icon-box {ib_map.get(color_theme, 'ib-indigo')}"><i class="{icon_cls}"></i></div>
         </div>
-        <div class="metric-num" style="font-size:24px; font-weight:800; letter-spacing:-0.5px; margin-bottom:10px;">
+        <div class="metric-num" style="font-size:25px; font-weight:800; letter-spacing:-0.5px; white-space:nowrap;">
             {value}
         </div>
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:nowrap;">
             <span class="badge-pill {bp_map.get(badge_theme, 'bp-green')}">
                 <i class="{arrow_ic}"></i> {badge_text}
             </span>
-            <span style="font-size:11px; color:var(--text-muted) !important; font-weight:600;">{subtext}</span>
+            <span style="font-size:11px; color:var(--text-muted) !important; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{subtext}</span>
         </div>
     </div>
     """)
@@ -1201,8 +1260,8 @@ def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme
     sub_html = f'<div style="font-size:11.5px; color:var(--text-muted) !important; margin-top:2px;">{subtitle_text}</div>' if subtitle_text else ""
     render_html(f"""
     <div class="chart-header-box">
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
-            <div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div style="min-width:0;">
                 <div style="font-family:'Outfit',sans-serif !important; font-size:15.5px; font-weight:700; color:var(--text-primary) !important;">{title_text}</div>
                 {sub_html}
             </div>
@@ -1211,7 +1270,7 @@ def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme
     </div>
     """)
 
-def apply_saas_plotly(fig, height=310, is_currency=False):
+def apply_saas_plotly(fig, height=320, is_currency=False):
     bg_col = "#111827" if is_dark else "#FFFFFF"
     txt_col = "#F8FAFC" if is_dark else "#0F172A"
     sub_col = "#94A3B8" if is_dark else "#475569"
@@ -1220,13 +1279,13 @@ def apply_saas_plotly(fig, height=310, is_currency=False):
     fig.update_layout(
         title=None,
         height=height,
-        margin=dict(l=10, r=10, t=18, b=52),
+        margin=dict(l=10, r=10, t=14, b=48),
         paper_bgcolor=bg_col,
         plot_bgcolor=bg_col,
         font=dict(family="Plus Jakarta Sans, sans-serif", size=11.5, color=txt_col),
         hovermode="x unified",
         legend=dict(
-            orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5,
+            orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5,
             font=dict(family="Plus Jakarta Sans, sans-serif", size=11.5, color=txt_col),
             bgcolor="rgba(0,0,0,0)"
         ),
@@ -1259,7 +1318,7 @@ def make_gauge_chart(value, max_val=100, suffix="%", bar_color="#10B981"):
         }
     ))
     fig.update_layout(
-        height=215, margin=dict(l=16, r=16, t=24, b=10),
+        height=230, margin=dict(l=16, r=16, t=24, b=10),
         paper_bgcolor=bg_col, plot_bgcolor=bg_col,
         font=dict(color=txt_col, family="Plus Jakarta Sans, sans-serif")
     )
@@ -1299,29 +1358,20 @@ def render_saas_table(df: pd.DataFrame, max_rows=50):
     """)
 
 # ==============================================================================
-# 9. TOP HEADER BAR + TOMBOL SAKELAR IKON DARK/LIGHT DI KANAN ATAS
+# 9. TOP HEADER BAR SEJAJAR & PRESISI
 # ==============================================================================
-if DIRECT_LOGO_URL:
-    header_logo_html = f'<img src="{DIRECT_LOGO_URL}" style="width:46px; height:46px; border-radius:12px; object-fit:contain; background:#FFFFFF; padding:4px; border:1px solid var(--border-soft);" alt="AmalQu">'
-else:
-    header_logo_html = (
-        '<div style="width:46px; height:46px; border-radius:12px; background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); '
-        'display:flex; align-items:center; justify-content:center; flex-shrink:0;">'
-        '<i class="ri-hand-heart-fill" style="color:#FFFFFF !important; font-size:24px;"></i></div>'
-    )
-
-hdr_col_left, hdr_col_right = st.columns([6.5, 0.8])
+hdr_col_left, hdr_col_right = st.columns([7.5, 1.1])
 with hdr_col_left:
     render_html(f"""
-    <div class="bento-card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:14px 20px; margin-bottom:14px;">
-        <div style="display:flex; align-items:center; gap:14px;">
-            {header_logo_html}
+    <div class="bento-card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:12px 18px !important; margin-bottom:14px !important;">
+        <div style="display:flex; align-items:center; gap:12px;">
+            {build_logo_html(40)}
             <div>
-                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                    <span style="font-family:'Outfit',sans-serif !important; font-size:22px; font-weight:800; letter-spacing:-0.4px;">AmalQu</span>
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span style="font-family:'Outfit',sans-serif !important; font-size:20px; font-weight:800; letter-spacing:-0.4px;">AmalQu</span>
                     <span class="badge-pill bp-orange">{menu_pilihan}</span>
                 </div>
-                <div style="font-size:12.5px; font-weight:600; color:var(--text-secondary) !important; margin-top:2px;">
+                <div style="font-size:12px; font-weight:600; color:var(--text-secondary) !important;">
                     Yayasan AmalQu Indonesia Peduli • Enterprise Command Center
                 </div>
             </div>
@@ -1333,14 +1383,14 @@ with hdr_col_left:
     </div>
     """)
 with hdr_col_right:
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-    theme_icon_btn = "☀️" if is_dark else "🌙"
-    if st.button(theme_icon_btn, key="top_theme_toggle", help="Sakelar Mode Gelap (🌙) / Terang (☀️)", use_container_width=True):
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    theme_icon_btn = "☀️ Terang" if is_dark else "🌙 Gelap"
+    if st.button(theme_icon_btn, key="top_theme_toggle", help="Ubah Mode Gelap / Terang", use_container_width=True):
         st.session_state.dark_mode = not st.session_state.dark_mode
         st.rerun()
 
 # ==============================================================================
-# HALAMAN 1: DASHBOARD OVERVIEW (ISOLASI OTOMATIS KHUSUS ROLE ADVERTISER)
+# HALAMAN 1: DASHBOARD OVERVIEW (4-COLUMN UNIFORM BENTO GRID ALA FINPILOT AI)
 # ==============================================================================
 if menu_pilihan == "Dashboard Overview":
     okt_r = df_macro[df_macro['Bulan'] == 'Oktober'].iloc[0]
@@ -1359,80 +1409,66 @@ if menu_pilihan == "Dashboard Overview":
 
     satpam_okt = hitung_satpam_keuangan(target_okt, real_okt, ads_okt, okt_r['Mushaf Terverifikasi'])
     tot_fin_ytd = df_macro['Realisasi Finance'].sum()
-    tot_ads_ytd = df_macro['Budget Iklan'].sum()
 
-    # BARIS 1: 4 BENTO KPI CARDS + 1 HERO CARD
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.15])
+    # BARIS 1: 4 KOLOM SERAGAM (3 KARTU PUTIH/GELAP + 1 KARTU UNGU HERO SATPAM KEUANGAN)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         render_bento_kpi(
-            "ri-bank-line", "indigo", "Data Real Finance (Oktober)",
+            "ri-bank-line", "indigo", "Realisasi Finance (Okt)",
             rp_short(real_okt), f"{real_okt/target_okt*100:.1f}% Target", "indigo",
-            f"YTD Real: {rp_short(tot_fin_ytd)}"
+            f"YTD: {rp_short(tot_fin_ytd)}"
         )
     with c2:
         render_bento_kpi(
-            "ri-user-voice-line", "emerald", "Data Dashboard CS (Oktober)",
-            rp_short(cs_okt_total), f"Selisih Bank: +{rp_short(selisih_real_cs_okt)}", "green",
-            f"Terverifikasi: {rp_short(cs_okt_final)}"
+            "ri-user-voice-line", "emerald", "Laporan CS (Oktober)",
+            rp_short(cs_okt_total), f"Bank +{rp_short(selisih_real_cs_okt)}", "green",
+            f"Final: {rp_short(cs_okt_final)}"
         )
     with c3:
         render_bento_kpi(
-            "ri-line-chart-line", "orange", "Proyeksi Akhir Bulan (Real)",
+            "ri-line-chart-line", "orange", "Proyeksi Akhir Bulan",
             rp_short(proyeksi_akhir_bulan_real), f"{proyeksi_akhir_bulan_real/target_okt*100:.1f}% Target", "orange",
             f"Optimis: {rp_short(proyeksi_optimis_real)}"
         )
     with c4:
-        if user_role == "Advertiser":
-            # Advertiser TIDAK boleh melihat Stok Gudang / Agenda Salur
-            render_bento_kpi(
-                "ri-advertisement-line", "rose", "Biaya Iklan (Oktober)",
-                rp_short(ads_okt), f"ROAS Real: {satpam_okt['roas_aktual']:.2f}x", "red",
-                f"YTD Ads: {rp_short(tot_ads_ytd)}"
-            )
-        else:
-            render_bento_kpi(
-                "ri-checkbox-multiple-line", "rose", "Stok Siap Salur vs Jadwal Okt",
-                f"{sa['mushaf_siap_total']:,} Mushaf".replace(",", "."), "Al-Wakaf Kurang 33 Pcs", "red",
-                f"Jadwal: {sa['st_jadwal'] + sa['aw_jadwal']:,} Mushaf"
-            )
-    with c5:
         render_html(f"""
         <div class="hero-card">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                <span style="font-size:11px; font-weight:700; letter-spacing:0.8px; text-transform:uppercase;">SATPAM KEUANGAN (REAL OKT)</span>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-size:11.5px; font-weight:700; letter-spacing:0.6px; text-transform:uppercase;">SATPAM KEUANGAN (OKT)</span>
                 <i class="ri-shield-star-line" style="font-size:18px;"></i>
             </div>
-            <div class="metric-num" style="font-size:26px; font-weight:800; margin-bottom:4px;">ROAS {satpam_okt['roas_aktual']:.2f}x</div>
-            <div style="font-size:11px; opacity:0.92; margin-bottom:10px;">Min Tier 1: <b>1.52x</b> • Aman Tier 3: <b>2.63x</b></div>
-            <div style="display:flex; justify-content:space-between; background:rgba(255,255,255,0.16); padding:6px 10px; border-radius:10px; font-size:11px; font-weight:600;">
-                <span>DSD: {rp_short(satpam_okt['dsd'])}</span>
-                <span>HPP: {rp(satpam_okt['plafon_hpp'])}</span>
+            <div class="metric-num" style="font-size:26px; font-weight:800; white-space:nowrap;">
+                ROAS {satpam_okt['roas_aktual']:.2f}x
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.16); padding:6px 10px; border-radius:10px; font-size:11px; font-weight:600; gap:8px;">
+                <span class="nowrap-val">DSD: {rp_short(satpam_okt['dsd'])}</span>
+                <span class="nowrap-val">HPP: {rp(satpam_okt['plafon_hpp'])}</span>
             </div>
         </div>
         """)
 
-    # BARIS 2: GRAFIK KOMPARASI REAL FINANCE VS DASHBOARD CS + GARIS PROYEKSI AKHIR BULAN
-    m_left, m_right = st.columns([1.8, 1.05])
+    # BARIS 2: GRAFIK KOMPARASI (KIRI) & KARTU REKONSILIASI TANPA TEXT WRAP (KANAN)
+    m_left, m_right = st.columns([1.75, 1.05])
     with m_left:
         render_chart_header(
-            "Komparasi Real Finance vs Dashboard CS & Proyeksi Akhir Bulan (Jan – Okt 2026)",
-            f"Realisasi Bank Oktober: {rp(real_okt)} • Dashboard CS: {rp(cs_okt_total)} • Proyeksi Akhir Oktober: {rp(proyeksi_akhir_bulan_real)}",
-            "Real vs CS + Proyeksi", "indigo"
+            "Komparasi Real Finance vs Dashboard CS & Proyeksi Akhir Bulan",
+            f"Mutasi Bank Okt: {rp(real_okt)} • Input CS: {rp(cs_okt_total)} • Proyeksi 31 Okt: {rp(proyeksi_akhir_bulan_real)}",
+            "Jan – Okt 2026", "indigo"
         )
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Scatter(
-            x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Data Real Finance (Mutasi Bank)',
-            mode='lines+markers', line=dict(color='#4F46E5', width=3, shape='spline'),
-            fill='tozeroy', fillcolor='rgba(79, 70, 229, 0.08)'
+            x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Real Finance (Bank)',
+            mode='lines+markers', line=dict(color='#6366F1', width=3, shape='spline'),
+            fill='tozeroy', fillcolor='rgba(99, 102, 241, 0.1)'
         ))
         fig_ov.add_trace(go.Scatter(
-            x=df_macro['Bulan'], y=df_macro['Omset CS'], name='Data Dashboard CS (Terlapor)',
+            x=df_macro['Bulan'], y=df_macro['Omset CS'], name='Input Dashboard CS',
             mode='lines+markers', line=dict(color='#10B981', width=2.6, shape='spline')
         ))
         sep_real = float(df_macro[df_macro['Bulan'] == 'September']['Realisasi Finance'].iloc[0])
         fig_ov.add_trace(go.Scatter(
             x=['September', 'Oktober'], y=[sep_real, proyeksi_akhir_bulan_real],
-            name='Proyeksi Akhir Bulan (Real Run-Rate)',
+            name='Proyeksi Akhir Bulan',
             mode='lines+markers', line=dict(color='#F59E0B', width=3, dash='dash')
         ))
         fig_ov.add_trace(go.Scatter(
@@ -1444,71 +1480,88 @@ if menu_pilihan == "Dashboard Overview":
 
     with m_right:
         if user_role == "Advertiser":
-            bottom_insight_box = """
+            bottom_box_html = f"""
             <div class="sub-box" style="border-radius:12px; padding:11px 14px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                    <span style="font-size:12px; font-weight:700;"><i class="ri-Filter-3-line" style="color:#10B981 !important;"></i> Performa Funnel Leads Oktober</span>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <span style="font-size:12px; font-weight:700;"><i class="ri-advertisement-line" style="color:#10B981 !important;"></i> Evaluasi Funnel Iklan</span>
                     <span class="badge-pill bp-green">Conv. 74,3%</span>
                 </div>
-                <div style="font-size:11.5px; color:var(--text-secondary) !important; line-height:1.45;">
-                    • <b>Leads Meta Ads:</b> Menyumbang <b>Rp 90,44 Jt (83,2%)</b> dari total perolehan CS Oktober.<br>
-                    • <b>Rasio Closing CS Aktif:</b> <b>962 Chat Valid</b> menghasilkan <b>715 Closing</b> (Nisa 525, Salma 183, Aulia 7).
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+                    <span style="color:var(--text-secondary) !important;">Biaya Iklan Oktober</span>
+                    <span class="nowrap-val">{rp(ads_okt)}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:12px;">
+                    <span style="color:var(--text-secondary) !important;">Kontribusi Leads Meta</span>
+                    <span class="nowrap-val" style="color:#10B981 !important;">Rp 90.442.000 (83,2%)</span>
                 </div>
             </div>
             """
         else:
-            bottom_insight_box = """
+            bottom_box_html = f"""
             <div class="sub-box" style="border-radius:12px; padding:11px 14px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
                     <span style="font-size:12px; font-weight:700;"><i class="ri-alarm-warning-line" style="color:#EF4444 !important;"></i> Audit Stok vs Jadwal Salur Okt</span>
-                    <span class="badge-pill bp-red">Tempel Stiker!</span>
+                    <span class="badge-pill bp-red">Kurang 33 Stiker</span>
                 </div>
-                <div style="font-size:11.5px; color:var(--text-secondary) !important; line-height:1.45;">
-                    • <b>Super Tajwid:</b> Siap <b>801 Pcs</b> vs Jadwal <b>653 Pcs</b> (<b style="color:#10B981 !important;">Surplus +148 Pcs</b>)<br>
-                    • <b>Al-Wakaf:</b> Siap <b>318 Pcs</b> vs Jadwal <b>351 Pcs</b> (<b style="color:#EF4444 !important;">Kurang -33 Pcs Siap Salur</b>; segera tempel stiker dari <b>480 Pcs</b> stok R. AmalQu).
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+                    <span style="color:var(--text-secondary) !important;">Super Tajwid (Siap vs Jadwal)</span>
+                    <span class="nowrap-val" style="color:#10B981 !important;">801 vs 653 Pcs (+148)</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:12px;">
+                    <span style="color:var(--text-secondary) !important;">Al-Wakaf (Siap vs Jadwal)</span>
+                    <span class="nowrap-val" style="color:#EF4444 !important;">318 vs 351 Pcs (-33)</span>
                 </div>
             </div>
             """
 
         render_html(f"""
-        <div class="bento-card" style="min-height:385px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px;">
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <div class="icon-box ib-indigo" style="width:32px; height:32px; font-size:15px;"><i class="ri-scales-3-line"></i></div>
-                    <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15px;">Rekonsiliasi Real vs CS & Proyeksi</span>
+        <div class="bento-card" style="min-height:392px; display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <div class="icon-box ib-indigo" style="width:32px; height:32px; font-size:15px;"><i class="ri-scales-3-line"></i></div>
+                        <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15px;">Rekonsiliasi Real vs CS & Proyeksi</span>
+                    </div>
+                    <span class="badge-pill bp-indigo">OKTOBER 2026</span>
                 </div>
-                <span class="badge-pill bp-indigo">OKTOBER 2026</span>
+                <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:5px;">
+                        <span style="color:var(--text-secondary) !important;">1. Realisasi Mutasi Bank</span>
+                        <span class="nowrap-val" style="color:#6366F1 !important;">{rp(real_okt)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:5px;">
+                        <span style="color:var(--text-secondary) !important;">2. Total Input Dashboard CS</span>
+                        <span class="nowrap-val" style="color:#10B981 !important;">{rp(cs_okt_total)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; border-top:1px dashed var(--border-soft); padding-top:5px;">
+                        <span style="color:var(--text-secondary) !important;">Selisih Bank vs CS</span>
+                        <span class="nowrap-val" style="color:#F97316 !important;">+{rp(selisih_real_cs_okt)}</span>
+                    </div>
+                </div>
+                <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <span style="font-size:12px; font-weight:700;"><i class="ri-compass-3-line" style="color:#F59E0B !important;"></i> Proyeksi Akhir Bulan (31 Okt)</span>
+                        <span class="badge-pill bp-orange">{proyeksi_akhir_bulan_real/target_okt*100:.1f}% Target</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+                        <span style="color:var(--text-secondary) !important;">Laju Real Harian</span>
+                        <span class="nowrap-val">{rp(laju_harian_real)} / hari</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+                        <span style="color:var(--text-secondary) !important;">Proyeksi Konservatif</span>
+                        <span class="nowrap-val" style="color:#F59E0B !important;">{rp(proyeksi_akhir_bulan_real)}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:12px;">
+                        <span style="color:var(--text-secondary) !important;">Proyeksi Optimis (14 Hari)</span>
+                        <span class="nowrap-val" style="color:#10B981 !important;">{rp(proyeksi_optimis_real)}</span>
+                    </div>
+                </div>
             </div>
-            <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:9px;">
-                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px;">
-                    <span style="color:var(--text-secondary) !important;">1. Pendapatan Real Finance (Bank):</span>
-                    <b style="color:#4F46E5 !important;">{rp(real_okt)}</b>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px;">
-                    <span style="color:var(--text-secondary) !important;">2. Total Input Dashboard CS:</span>
-                    <b style="color:#10B981 !important;">{rp(cs_okt_total)}</b>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px; border-top:1px dashed var(--border-soft); padding-top:4px;">
-                    <span style="color:var(--text-secondary) !important;">Selisih Bank vs CS (Unidentified):</span>
-                    <b style="color:#F97316 !important;">+{rp(selisih_real_cs_okt)}</b>
-                </div>
-            </div>
-            <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:9px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                    <span style="font-size:12px; font-weight:700;"><i class="ri-compass-3-line" style="color:#F59E0B !important;"></i> Proyeksi Akhir Bulan (31 Okt)</span>
-                    <span class="badge-pill bp-orange">{proyeksi_akhir_bulan_real/target_okt*100:.1f}% Target</span>
-                </div>
-                <div style="font-size:11.5px; color:var(--text-secondary) !important; line-height:1.45;">
-                    • Rata-rata Real Harian: <b>{rp(laju_harian_real)} / hari</b><br>
-                    • Estimasi Tutup Buku (Konservatif): <b>{rp(proyeksi_akhir_bulan_real)}</b><br>
-                    • Estimasi Tutup Buku (Optimis 14 Hari Aktif): <b>{rp(proyeksi_optimis_real)}</b>
-                </div>
-            </div>
-            {bottom_insight_box}
+            {bottom_box_html}
         </div>
         """)
 
-    # BARIS 3: KHUSUS ADVERTISER TAMPILKAN METRIK ADS/CS, SEDANGKAN ADMIN/FINANCE TAMPILKAN KESIAPAN STOK VS JADWAL
+    # BARIS 3: 3 KARTU BAWAH (ISOLASI OTOMATIS SESUAI ROLE)
     b1, b2, b3 = st.columns(3)
     if user_role == "Advertiser":
         with b1:
@@ -1635,7 +1688,7 @@ if menu_pilihan == "Dashboard Overview":
 # HALAMAN 2: DONASI & SATPAM KEUANGAN
 # ==============================================================================
 elif menu_pilihan == "Donasi & Satpam Keuangan":
-    f1_a, f1_b, f1_c = st.columns([1.5, 1.5, 1.5])
+    f1_a, f1_b, f1_c = st.columns(3)
     with f1_a:
         cakupan_fin = st.selectbox(
             "1. Pilih Cakupan Periode Analisis:",
@@ -1723,7 +1776,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     with c3:
         render_bento_kpi("ri-advertisement-line", "orange", "Biaya Iklan Terpakai", rp_short(b_ads), f"ROAS: {sk['roas_aktual']:.2f}x", sk['badge_type'], "Min: 1.52x | Aman: 2.63x")
     with c4:
-        render_bento_kpi("ri-shield-check-line", "rose", "Dana Siap Salur (DSD)", rp_short(sk['dsd']), f"HPP Maks: {rp(sk['plafon_hpp'])}", "green" if sk['plafon_hpp'] >= 20000 else "red", f"{sk['kebutuhan_mushaf_pcs']:,} Mushaf")
+        render_bento_kpi("ri-shield-check-line", "rose", "Dana Siap Salur (DSD)", rp_short(sk['dsd']), f"HPP: {rp(sk['plafon_hpp'])}", "green" if sk['plafon_hpp'] >= 20000 else "red", f"{sk['kebutuhan_mushaf_pcs']:,} Mushaf")
 
     g_left, g_right = st.columns([1.75, 1.05])
     with g_left:
@@ -1737,7 +1790,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
             if cs_fin_filter in ["Semua Tim CS", "Nisa"]:
                 fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Nisa'], name='CS Nisa', mode='lines+markers', line=dict(color='#FF6B4A', width=2.8, shape='spline')))
             if cs_fin_filter in ["Semua Tim CS", "Salma"]:
-                fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Salma'], name='CS Salma', mode='lines+markers', line=dict(color='#4F46E5', width=2.8, shape='spline')))
+                fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Salma'], name='CS Salma', mode='lines+markers', line=dict(color='#6366F1', width=2.8, shape='spline')))
             if cs_fin_filter in ["Semua Tim CS", "Aulia"]:
                 fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Aulia'], name='CS Aulia', mode='lines+markers', line=dict(color='#10B981', width=2.8, shape='spline')))
             apply_saas_plotly(fig_f2, height=330, is_currency=True)
@@ -1749,7 +1802,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
                 lbl_badge, "indigo"
             )
             fig_f1 = go.Figure()
-            fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Realisasi Finance (Bank)', marker_color='#4F46E5', marker_cornerradius=6))
+            fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Realisasi Finance (Bank)', marker_color='#6366F1', marker_cornerradius=6))
             fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Omset CS'], name='Funding CS', marker_color='#10B981', marker_cornerradius=6))
             fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Budget Iklan'], name='Biaya Iklan', marker_color='#FF6B4A', marker_cornerradius=6))
             apply_saas_plotly(fig_f1, height=330, is_currency=True)
@@ -1758,22 +1811,24 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
 
     with g_right:
         render_html(f"""
-        <div class="bento-card" style="min-height:375px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
-                <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15.5px;">
-                    <i class="ri-calculator-line" style="color:#4F46E5 !important;"></i> Kalkulator Satpam Keuangan
-                </span>
-                <span class="badge-pill bp-{sk['badge_type']}">{lbl_badge}</span>
+        <div class="bento-card" style="min-height:382px; display:flex; flex-direction:column; justify-content:space-between;">
+            <div>
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:14px;">
+                    <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15.5px;">
+                        <i class="ri-calculator-line" style="color:#6366F1 !important;"></i> Kalkulator Satpam Keuangan
+                    </span>
+                    <span class="badge-pill bp-{sk['badge_type']}">{lbl_badge}</span>
+                </div>
+                <div style="font-size:12.5px; color:var(--text-secondary) !important; line-height:2.2;">
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Profit Iklan (Donasi - Ads)</span><span class="nowrap-val" style="color:var(--text-primary) !important;">{rp(sk['profit_iklan'])}</span></div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Beban Operasional (10%)</span><span class="nowrap-val" style="color:var(--text-primary) !important;">{rp(sk['beban_ops_10'])}</span></div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Dana Siap Salur (DSD)</span><span class="nowrap-val" style="color:#6366F1 !important;">{rp(sk['dsd'])}</span></div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Alokasi Mushaf (65% DSD)</span><span class="nowrap-val" style="color:#10B981 !important;">{rp(sk['alokasi_mushaf_65'])}</span></div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Cadangan Cashback (35%)</span><span class="nowrap-val" style="color:#F59E0B !important;">{rp(sk['cadangan_cashback_35'])}</span></div>
+                    <div style="display:flex; justify-content:space-between;"><span>Target Subsidi CRM CS</span><span class="nowrap-val" style="color:#EF4444 !important;">{rp(sk['target_crm_cs'])}</span></div>
+                </div>
             </div>
-            <div style="font-size:12.5px; color:var(--text-secondary) !important; line-height:2.15;">
-                <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Profit Iklan (Donasi - Ads)</span><b style="color:var(--text-primary) !important;">{rp(sk['profit_iklan'])}</b></div>
-                <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Beban Operasional (10%)</span><b style="color:var(--text-primary) !important;">{rp(sk['beban_ops_10'])}</b></div>
-                <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Dana Siap Salur (DSD)</span><b style="color:#6366F1 !important;">{rp(sk['dsd'])}</b></div>
-                <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Alokasi Mushaf (65% DSD)</span><b style="color:#10B981 !important;">{rp(sk['alokasi_mushaf_65'])}</b></div>
-                <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Cadangan Cashback (35%)</span><b style="color:#F59E0B !important;">{rp(sk['cadangan_cashback_35'])}</b></div>
-                <div style="display:flex; justify-content:space-between;"><span>Target Subsidi CRM CS</span><b style="color:#EF4444 !important;">{rp(sk['target_crm_cs'])}</b></div>
-            </div>
-            <div class="sub-box" style="margin-top:14px; padding:10px 12px; border-radius:10px; font-size:12px;">
+            <div class="sub-box" style="margin-top:12px; padding:10px 12px; border-radius:10px; font-size:12px;">
                 <i class="ri-award-line" style="color:#F97316 !important;"></i> <b>Keputusan Sistem:</b> {sk['rekom_tier']}
             </div>
         </div>
@@ -1886,7 +1941,7 @@ elif menu_pilihan == "Performa CS & Leads":
         with c3:
             render_bento_kpi("ri-money-dollar-circle-line", "orange", f"Nominal Closing ({pilih_prog})", rp_short(tn), f"AOV: {rp(tn/tc if tc>0 else 0)}", "orange", "Terverifikasi")
         with c4:
-            render_bento_kpi("ri-customer-service-2-line", "emerald", "Total Follow-Up Tercatat", f"{tot_fu:,} Kontak", "3 CS Ads + 1 CRM Aktif", "green", "Desi/Rida/Syafiq/Sarah Non-Aktif")
+            render_bento_kpi("ri-customer-service-2-line", "emerald", "Total Follow-Up Tercatat", f"{tot_fu:,} Kontak", "3 CS Ads + 1 CRM Aktif", "green", "Oktober 2026")
 
         cl_l, cl_r = st.columns([1.8, 1])
         with cl_l:
@@ -1896,7 +1951,7 @@ elif menu_pilihan == "Performa CS & Leads":
                 pilih_prog, "orange"
             )
             df_lg = df_l.groupby(['Tanggal', 'Nama CS'], as_index=False).agg({'Nominal_Aktif': 'sum', 'Closing_Aktif': 'sum'})
-            fig_cs = px.bar(df_lg, x='Tanggal', y='Nominal_Aktif', color='Nama CS', barmode='group', color_discrete_sequence=['#FF6B4A', '#4F46E5', '#10B981'])
+            fig_cs = px.bar(df_lg, x='Tanggal', y='Nominal_Aktif', color='Nama CS', barmode='group', color_discrete_sequence=['#FF6B4A', '#6366F1', '#10B981'])
             apply_saas_plotly(fig_cs, height=275, is_currency=True)
             st.plotly_chart(fig_cs, use_container_width=True)
 
@@ -1905,7 +1960,7 @@ elif menu_pilihan == "Performa CS & Leads":
             fig_g_cs = make_gauge_chart(round(cr_okt, 1), max_val=100, suffix="%", bar_color="#10B981")
             st.plotly_chart(fig_g_cs, use_container_width=True)
 
-        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; margin:6px 0;"><i class="ri-table-2" style="color:#FF6B4A !important;"></i> Tabel Harian Pengelolaan Leads Oktober (Sesuai Filter di Atas)</div>')
+        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; margin:6px 0;"><i class="ri-table-2" style="color:#FF6B4A !important;"></i> Tabel Harian Pengelolaan Leads Oktober</div>')
         df_l_show = df_l[["Tanggal", "Nama CS", "Leads_Aktif", "Chat Invalid", "Closing_Aktif", "Nominal_Aktif", "SantriQu_Closing", "AmalQu_Closing", "JariyahQu_Closing", "Total Follow Up"]].copy()
         df_l_show.rename(columns={"Leads_Aktif": f"Leads ({pilih_prog})", "Closing_Aktif": f"Closing ({pilih_prog})", "Nominal_Aktif": f"Nominal ({pilih_prog})"}, inplace=True)
         df_l_show[f"Nominal ({pilih_prog})"] = df_l_show[f"Nominal ({pilih_prog})"].apply(rp)
@@ -1938,11 +1993,11 @@ elif menu_pilihan == "Performa CS & Leads":
         with k1:
             render_bento_kpi("ri-wallet-3-line", "indigo", "Total Omset (Jan–Sep)", rp_short(tot_omset_jan_sep), f"{len(df_ov_view)} Personel CS", "indigo", pilih_cs_rapor)
         with k2:
-            render_bento_kpi("ri-flashlight-line", "orange", "Omset Oktober (Realtime)", rp_short(tot_omset_okt), "Aktif" if tot_omset_okt > 0 else "Non-Aktif di Okt", "green" if tot_omset_okt > 0 else "red", "Oktober 2026")
+            render_bento_kpi("ri-flashlight-line", "orange", "Omset Oktober (Realtime)", rp_short(tot_omset_okt), "Aktif" if tot_omset_okt > 0 else "Non-Aktif", "green" if tot_omset_okt > 0 else "red", "Oktober 2026")
         with k3:
             render_bento_kpi("ri-shopping-bag-3-line", "emerald", "Total Transaksi Closing", f"{tot_closing_all:,} Transaksi", "Akumulasi YTD", "green", "Jan–Sep 2026")
         with k4:
-            render_bento_kpi("ri-price-tag-3-line", "indigo", "Rata-rata Nilai Donasi (AOV)", rp(avg_aov), "Per Closing", "indigo", "Rata-rata CS")
+            render_bento_kpi("ri-price-tag-3-line", "indigo", "Rata-rata Donasi (AOV)", rp(avg_aov), "Per Closing", "indigo", "Rata-rata CS")
 
         months_cols = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober"]
         render_chart_header(
@@ -1951,7 +2006,7 @@ elif menu_pilihan == "Performa CS & Leads":
             "Jan–Okt 2026", "indigo"
         )
         fig_ov_cs = go.Figure()
-        palette = ['#FF6B4A', '#4F46E5', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#06B6D4', '#64748B']
+        palette = ['#FF6B4A', '#6366F1', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#06B6D4', '#64748B']
         for idx_c, (_, r_cs) in enumerate(df_ov_view.iterrows()):
             y_vals = [float(r_cs[m]) for m in months_cols]
             fig_ov_cs.add_trace(go.Bar(x=months_cols, y=y_vals, name=r_cs['Nama CS'], marker_color=palette[idx_c % len(palette)], marker_cornerradius=5))
@@ -1972,24 +2027,24 @@ elif menu_pilihan == "Logistik & Gudang":
     with c1:
         render_bento_kpi(
             "ri-book-mark-line", "emerald", "Mushaf Super Tajwid",
-            f"{sa['st_siap']:,} Siap Salur", f"Jadwal Okt: {sa['st_jadwal']} Pcs (Surplus +{sa['st_gap_siap']})", "green",
+            f"{sa['st_siap']:,} Siap Salur", f"Jadwal: {sa['st_jadwal']} (+{sa['st_gap_siap']})", "green",
             f"Belum Stiker: {sa['st_belum']} Pcs"
         )
     with c2:
         render_bento_kpi(
-            "ri-book-2-line", "rose", "Mushaf Al-Wakaf (Meta + TikTok)",
-            f"{sa['aw_total_siap']:,} Siap Salur", f"Jadwal Okt: {sa['aw_jadwal']} Pcs (Kurang {sa['aw_gap_total_siap']} Pcs)", "red",
+            "ri-book-2-line", "rose", "Mushaf Al-Wakaf",
+            f"{sa['aw_total_siap']:,} Siap Salur", f"Jadwal: {sa['aw_jadwal']} ({sa['aw_gap_total_siap']} Pcs)", "red",
             f"Belum Stiker: {sa['aw_belum_stiker']} • PO: {sa['aw_belum_ambil']:,}"
         )
     with c3:
         render_bento_kpi(
-            "ri-book-open-line", "indigo", "Buku Belajar Super Tahsin",
-            f"{sa['bt_siap']:,} Siap Salur".replace(",", "."), f"Sisa Target: {sa['bt_jadwal']} Pcs (Surplus +{sa['bt_gap_siap']:,})", "green",
+            "ri-book-open-line", "indigo", "Buku Super Tahsin",
+            f"{sa['bt_siap']:,} Siap Salur".replace(",", "."), f"Target: {sa['bt_jadwal']} (+{sa['bt_gap_siap']:,})", "green",
             f"Belum Stiker: {sa['bt_belum']:,} Pcs".replace(",", ".")
         )
     with c4:
         render_bento_kpi(
-            "ri-archive-line", "orange", "Total Mushaf vs Buku Tahsin",
+            "ri-archive-line", "orange", "Total Mushaf vs Tahsin",
             f"{sa['mushaf_fisik_total']:,} Mushaf".replace(",", "."), f"Siap: {sa['mushaf_siap_total']:,} • Belum: {sa['mushaf_belum_total']:,}", "orange",
             f"Total Tahsin: {sa['bt_total']:,} Pcs".replace(",", ".")
         )
@@ -1997,15 +2052,15 @@ elif menu_pilihan == "Logistik & Gudang":
     render_html(f"""
     <div class="bento-card" style="border-left: 4px solid #F97316;">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
-            <span style="font-family:'Outfit',sans-serif !important; font-size:16px; font-weight:800;">
-                <i class="ri-shield-check-fill" style="color:#F97316 !important;"></i> Monitoring Kesiapan Stok (Sudah Stiker vs Belum Stiker) terhadap Jadwal Distribusi Oktober 2026
+            <span style="font-family:'Outfit',sans-serif !important; font-size:15.5px; font-weight:800;">
+                <i class="ri-shield-check-fill" style="color:#F97316 !important;"></i> Audit Kesiapan Stok (Sudah Stiker vs Belum Stiker) terhadap Jadwal Distribusi Oktober 2026
             </span>
             <span class="badge-pill bp-red"><i class="ri-alert-line"></i> Action Required: Al-Wakaf</span>
         </div>
-        <div style="font-size:12.5px; color:var(--text-secondary) !important; line-height:1.6;">
-            1. <b>Mushaf Super Tajwid:</b> Stok Siap Salur (Sudah Tempel Stiker) tersedia <b>{sa['st_siap']} Pcs</b>, sedangkan total kebutuhan di <i>Kalender Distribusi Oktober</i> adalah <b>{sa['st_jadwal']} Pcs</b> (5 titik lembaga) &rarr; <b style="color:#10B981 !important;">AMAN / CUKUP (Masih sisa +{sa['st_gap_siap']} Pcs siap salur)</b>.<br>
-            2. <b>Mushaf Al-Wakaf:</b> Kebutuhan di <i>Kalender Distribusi Oktober</i> adalah <b>{sa['aw_jadwal']} Pcs</b> (4 titik lembaga), sedangkan stok Siap Salur (Sudah Tempel Stiker) khusus kanal TikTok hanya <b>{sa['aw_tik_siap']} Pcs</b> (kurang <b>331 Pcs</b>) dan jika digabung dengan Siap Salur Meta Ads (<b>{sa['aw_meta_siap']} Pcs</b>) totalnya baru <b>{sa['aw_total_siap']} Pcs</b> &rarr; <b style="color:#EF4444 !important;">MASIH KURANG {abs(sa['aw_gap_total_siap'])} PCS SIAP SALUR!</b> Tim gudang wajib segera menempel stiker minimal <b>33 s/d 331 Pcs</b> dari <b>{sa['aw_belum_stiker']} Pcs</b> stok <i>Al-Wakaf Belum Tempel Stiker</i> di Ruang AmalQu.<br>
-            3. <b>Buku Belajar Super Tahsin:</b> Stok Siap Salur (Sudah Tempel Stiker) tersedia <b>{sa['bt_siap']:,} Pcs</b> (ditambah <b>{sa['bt_belum']:,} Pcs</b> belum tempel stiker) vs sisa target distribusi <b>{sa['bt_jadwal']} Pcs</b> &rarr; <b style="color:#10B981 !important;">AMAN / SURPLUS +{sa['bt_gap_siap']:,} PCS</b>.
+        <div style="font-size:12.5px; color:var(--text-secondary) !important; line-height:1.65;">
+            1. <b>Mushaf Super Tajwid:</b> Stok Siap Salur (Sudah Stiker) tersedia <b>{sa['st_siap']} Pcs</b> vs kebutuhan <i>Kalender Distribusi Oktober</i> <b>{sa['st_jadwal']} Pcs</b> (5 titik lembaga) &rarr; <b style="color:#10B981 !important;">AMAN / CUKUP (Surplus +{sa['st_gap_siap']} Pcs siap salur)</b>.<br>
+            2. <b>Mushaf Al-Wakaf:</b> Kebutuhan <i>Kalender Distribusi Oktober</i> adalah <b>{sa['aw_jadwal']} Pcs</b> (4 titik lembaga), sedangkan stok Siap Salur TikTok hanya <b>{sa['aw_tik_siap']} Pcs</b> dan gabungan dengan Meta Ads (<b>{sa['aw_meta_siap']} Pcs</b>) baru mencapai <b>{sa['aw_total_siap']} Pcs</b> &rarr; <b style="color:#EF4444 !important;">KURANG {abs(sa['aw_gap_total_siap'])} PCS SIAP SALUR!</b> Segera tempel stiker minimal <b>33 s/d 331 Pcs</b> dari <b>{sa['aw_belum_stiker']} Pcs</b> stok <i>Belum Tempel Stiker</i> di Ruang AmalQu.<br>
+            3. <b>Buku Belajar Super Tahsin:</b> Stok Siap Salur tersedia <b>{sa['bt_siap']:,} Pcs</b> (ditambah <b>{sa['bt_belum']:,} Pcs</b> belum stiker) vs sisa target distribusi <b>{sa['bt_jadwal']} Pcs</b> &rarr; <b style="color:#10B981 !important;">AMAN / SURPLUS +{sa['bt_gap_siap']:,} PCS</b>.
         </div>
     </div>
     """)
@@ -2013,7 +2068,7 @@ elif menu_pilihan == "Logistik & Gudang":
     lg_l, lg_r = st.columns([1.55, 1.25])
     with lg_l:
         render_chart_header(
-            "Komparasi Stok Siap Salur vs Belum Stiker vs Kebutuhan Jadwal Oktober",
+            "Komparasi Stok Siap Salur vs Belum Stiker vs Jadwal Oktober",
             "Memisahkan Mushaf Super Tajwid, Mushaf Al-Wakaf, dan Buku Super Tahsin",
             "Audit Gudang vs Jadwal", "indigo"
         )
@@ -2024,8 +2079,8 @@ elif menu_pilihan == "Logistik & Gudang":
         ])
         fig_comp_s = go.Figure()
         fig_comp_s.add_trace(go.Bar(x=df_comp_stok['Produk'], y=df_comp_stok['Siap Salur (Sudah Stiker)'], name='Siap Salur (Sudah Stiker)', marker_color='#10B981', marker_cornerradius=6, text=df_comp_stok['Siap Salur (Sudah Stiker)'], textposition='auto'))
-        fig_comp_s.add_trace(go.Bar(x=df_comp_stok['Produk'], y=df_comp_stok['Jadwal Distribusi Okt'], name='Kebutuhan Jadwal Distribusi Okt', marker_color='#4F46E5', marker_cornerradius=6, text=df_comp_stok['Jadwal Distribusi Okt'], textposition='auto'))
-        fig_comp_s.add_trace(go.Bar(x=df_comp_stok['Produk'], y=df_comp_stok['Belum Siap (Belum Stiker/PO)'], name='Belum Siap (Belum Stiker / PO)', marker_color='#F97316', marker_cornerradius=6, text=df_comp_stok['Belum Siap (Belum Stiker/PO)'], textposition='auto'))
+        fig_comp_s.add_trace(go.Bar(x=df_comp_stok['Produk'], y=df_comp_stok['Jadwal Distribusi Okt'], name='Kebutuhan Jadwal Okt', marker_color='#6366F1', marker_cornerradius=6, text=df_comp_stok['Jadwal Distribusi Okt'], textposition='auto'))
+        fig_comp_s.add_trace(go.Bar(x=df_comp_stok['Produk'], y=df_comp_stok['Belum Siap (Belum Stiker/PO)'], name='Belum Siap (Belum Stiker/PO)', marker_color='#F97316', marker_cornerradius=6, text=df_comp_stok['Belum Siap (Belum Stiker/PO)'], textposition='auto'))
         apply_saas_plotly(fig_comp_s, height=320)
         fig_comp_s.update_layout(barmode='group')
         st.plotly_chart(fig_comp_s, use_container_width=True)
@@ -2035,7 +2090,7 @@ elif menu_pilihan == "Logistik & Gudang":
         df_pk = db['packing_dus_bulanan']
         fig_pk = go.Figure()
         fig_pk.add_trace(go.Bar(x=df_pk['Bulan'], y=df_pk['Distribusi Selesai'], name='Selesai', marker_color='#10B981', marker_cornerradius=4))
-        fig_pk.add_trace(go.Bar(x=df_pk['Bulan'], y=df_pk['Packing / Proses Distribusi'], name='Proses/Packing', marker_color='#4F46E5', marker_cornerradius=4))
+        fig_pk.add_trace(go.Bar(x=df_pk['Bulan'], y=df_pk['Packing / Proses Distribusi'], name='Proses/Packing', marker_color='#6366F1', marker_cornerradius=4))
         fig_pk.add_trace(go.Bar(x=df_pk['Bulan'], y=df_pk['Penamaan Mushaf (Stiker)'], name='Stiker', marker_color='#FF6B4A', marker_cornerradius=4))
         fig_pk.add_trace(go.Bar(x=df_pk['Bulan'], y=df_pk['Verifikasi (Belum Stiker)'], name='Verifikasi', marker_color='#94A3B8', marker_cornerradius=4))
         apply_saas_plotly(fig_pk, height=320)
@@ -2073,11 +2128,11 @@ elif menu_pilihan == "Kalender Distribusi":
     with kc1:
         render_bento_kpi("ri-calendar-check-line", "indigo", "Total Agenda Oktober", f"{tot_agenda_kal} Titik Lokasi", f"Total: {tot_mushaf_kal:,} Mushaf", "indigo", "20–31 Okt 2026")
     with kc2:
-        render_bento_kpi("ri-book-mark-line", "emerald", "Jadwal Super Tajwid", f"{sa['st_jadwal']} Mushaf", f"Stok Siap: {sa['st_siap']} Pcs (Cukup)", "green", f"Surplus +{sa['st_gap_siap']} Pcs")
+        render_bento_kpi("ri-book-mark-line", "emerald", "Jadwal Super Tajwid", f"{sa['st_jadwal']} Mushaf", f"Siap: {sa['st_siap']} Pcs (Cukup)", "green", f"Surplus +{sa['st_gap_siap']} Pcs")
     with kc3:
-        render_bento_kpi("ri-book-2-line", "rose", "Jadwal Al-Wakaf TikTok", f"{sa['aw_jadwal']} Mushaf", f"Siap: {sa['aw_total_siap']} Pcs (Kurang {abs(sa['aw_gap_total_siap'])})", "red", f"Stok TikTok: {sa['aw_tik_siap']} • Meta: {sa['aw_meta_siap']}")
+        render_bento_kpi("ri-book-2-line", "rose", "Jadwal Al-Wakaf TikTok", f"{sa['aw_jadwal']} Mushaf", f"Siap: {sa['aw_total_siap']} (Kurang {abs(sa['aw_gap_total_siap'])})", "red", f"TikTok: {sa['aw_tik_siap']} • Meta: {sa['aw_meta_siap']}")
     with kc4:
-        render_bento_kpi("ri-price-tag-2-line", "orange", "Cadangan Belum Stiker", f"{sa['aw_belum_stiker']} Mushaf", "Di Ruang AmalQu (10 Box)", "orange", "Siap Ditempel Stiker")
+        render_bento_kpi("ri-price-tag-2-line", "orange", "Cadangan Belum Stiker", f"{sa['aw_belum_stiker']} Mushaf", "Ruang AmalQu (10 Box)", "orange", "Siap Ditempel Stiker")
 
     events_by_day = {}
     for _, r_k in df_kal.iterrows():
@@ -2161,7 +2216,7 @@ elif menu_pilihan == "Kalender Distribusi":
 
     f_kal_1, f_kal_2 = st.columns([2.5, 1])
     with f_kal_1:
-        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; padding-top:8px;"><i class="ri-table-line" style="color:#4F46E5 !important;"></i> Rincian Agenda Distribusi Scheduled (Sheet Kalender Oktober 2026 • Kolom A–J)</div>')
+        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; padding-top:8px;"><i class="ri-table-line" style="color:#6366F1 !important;"></i> Rincian Agenda Distribusi Scheduled (Sheet Kalender Oktober 2026 • Kolom A–J)</div>')
     with f_kal_2:
         pilih_var_kal = st.selectbox("Filter Variasi Mushaf:", ["Semua Variasi", "Super Tajwid", "Al Wakaf Tiktok"], key="kal_var")
 
@@ -2179,11 +2234,11 @@ elif menu_pilihan == "Database & WA Blast":
     dk = db['db_kpi']
     d1, d2, d3, d4 = st.columns(4)
     with d1:
-        render_bento_kpi("ri-user-follow-line", "emerald", "Donatur Terkonfirmasi", f"{dk['total_donatur']:,}".replace(",", "."), f"Konversi {dk['konversi_pct']}%", "green", f"Total Kontak: {dk['total_kontak']:,}")
+        render_bento_kpi("ri-user-follow-line", "emerald", "Donatur Terkonfirmasi", f"{dk['total_donatur']:,}".replace(",", "."), f"Konversi {dk['konversi_pct']}%", "green", f"Kontak: {dk['total_kontak']:,}")
     with d2:
         render_bento_kpi("ri-user-add-line", "orange", "Leads Belum Donasi", f"{dk['total_leads']:,}".replace(",", "."), "Prospek Follow-Up", "orange", "Siap Reaktivasi")
     with d3:
-        render_bento_kpi("ri-vip-diamond-line", "indigo", "Total Donasi Kumulatif", rp_short(dk['total_donasi_kumulatif']), f"LTV: {rp(dk['rata_rata_donasi'])}", "indigo", "Rata-rata per Donatur")
+        render_bento_kpi("ri-vip-diamond-line", "indigo", "Total Donasi Kumulatif", rp_short(dk['total_donasi_kumulatif']), f"LTV: {rp(dk['rata_rata_donasi'])}", "indigo", "Rata-rata / Donatur")
     with d4:
         render_bento_kpi("ri-notification-badge-line", "rose", "Status Callback Segera", "12.285 Kontak", "84,94% Database", "red", "Prioritas Broadcast")
 
