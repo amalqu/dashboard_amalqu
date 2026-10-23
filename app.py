@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import os, re, glob, datetime, time
+import os, re, io, datetime, time, urllib.request
 from datetime import timezone, timedelta
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
-# 1. KONFIGURASI HALAMAN UTAMA, ZONA WAKTU WIB (UTC+7) & PERSISTENT LOGIN
+# 1. KONFIGURASI HALAMAN, ZONA WAKTU WIB (UTC+7) & STATE
 # ==============================================================================
 st.set_page_config(
     page_title="AmalQu — Yayasan AmalQu Indonesia Peduli",
@@ -22,21 +22,19 @@ TZ_WIB = timezone(timedelta(hours=7))
 def now_wib():
     return datetime.datetime.now(TZ_WIB)
 
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = True
-if "auth_user" not in st.session_state:
-    st.session_state.auth_user = None
+if "dark_mode" not in st.session_state: st.session_state.dark_mode = True
+if "auth_user" not in st.session_state: st.session_state.auth_user = None
+if "sync_nonce" not in st.session_state: st.session_state.sync_nonce = 0
 
 def render_html(raw_html: str):
-    cleaned = " ".join(line.strip() for line in raw_html.splitlines() if line.strip())
-    st.markdown(cleaned, unsafe_allow_html=True)
+    st.markdown(" ".join(line.strip() for line in raw_html.splitlines() if line.strip()), unsafe_allow_html=True)
 
 def build_logo_html(size_px=44):
     return (
-        f'<div style="position:relative; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;">'
-        f'<div style="width:{size_px}px; height:{size_px}px; border-radius:12px; background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%); '
-        f'display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow:0 4px 14px rgba(249,115,22,0.3);">'
-        f'<svg width="{int(size_px*0.56)}" height="{int(size_px*0.56)}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+        f'<div style="position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">'
+        f'<div style="width:{size_px}px;height:{size_px}px;border-radius:12px;background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%);'
+        f'display:inline-flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(249,115,22,0.3);">'
+        f'<svg width="{int(size_px*0.56)}" height="{int(size_px*0.56)}" viewBox="0 0 24 24" fill="none">'
         f'<path d="M12 2L3 7V12C3 17.55 6.84 22.74 12 24C17.16 22.74 21 17.55 21 12V7L12 2ZM12 6.5C13.93 6.5 15.5 8.07 15.5 10C15.5 11.93 13.93 13.5 12 13.5C10.07 13.5 8.5 11.93 8.5 10C8.5 8.07 10.07 6.5 12 6.5ZM18 17.5C16.5 19.3 14.3 20.5 12 20.5C9.7 20.5 7.5 19.3 6 17.5C6.5 15.8 9.8 14.8 12 14.8C14.2 14.8 17.5 15.8 18 17.5Z" fill="white"/>'
         f'</svg></div></div>'
     )
@@ -48,36 +46,30 @@ def rp(val):
     try:
         v = float(val)
         return f"-Rp {abs(v):,.0f}".replace(",", ".") if v < 0 else f"Rp {v:,.0f}".replace(",", ".")
-    except:
-        return "Rp 0"
+    except: return "Rp 0"
 
 def rp_dash(val):
     try:
         v = float(val)
         return "-" if v == 0 else f"Rp{v:,.0f}".replace(",", ".")
-    except:
-        return "-"
+    except: return "-"
 
 def rp_short(val):
     try:
         v = float(val)
-        sign = "-" if v < 0 else ""
-        av = abs(v)
+        sign, av = ("-" if v < 0 else ""), abs(v)
         if av >= 1_000_000_000: return f"{sign}Rp {av/1_000_000_000:.2f} M"
-        elif av >= 1_000_000: return f"{sign}Rp {av/1_000_000:.1f} Jt"
+        if av >= 1_000_000: return f"{sign}Rp {av/1_000_000:.1f} Jt"
         return f"{sign}Rp {av:,.0f}".replace(",", ".")
-    except:
-        return "Rp 0"
+    except: return "Rp 0"
 
 def num_clean(val):
     if pd.isna(val): return 0.0
     s = str(val).strip()
     if not s or s in ["-", "None", "nan", "#REF!", "#VALUE!", "#DIV/0!", "#ERROR!", "#N/A"]: return 0.0
     is_neg = s.startswith("(") and s.endswith(")")
-    try:
-        return -float(s[1:-1]) if is_neg else float(s)
-    except:
-        pass
+    try: return -float(s[1:-1]) if is_neg else float(s)
+    except: pass
     s_clean = re.sub(r'[^0-9.,-]', '', s)
     if not s_clean or s_clean == "-": return 0.0
     if '.' in s_clean and ',' in s_clean:
@@ -85,42 +77,33 @@ def num_clean(val):
     elif ',' in s_clean:
         parts = s_clean.split(',')
         s_clean = s_clean.replace(',', '.') if len(parts[-1]) <= 2 else s_clean.replace(',', '')
-    elif s_clean.count('.') > 1:
-        s_clean = s_clean.replace('.', '')
+    elif s_clean.count('.') > 1: s_clean = s_clean.replace('.', '')
     elif '.' in s_clean:
         parts = s_clean.split('.')
-        if len(parts[-1]) == 3 and len(parts[0]) >= 1:
-            s_clean = s_clean.replace('.', '')
+        if len(parts[-1]) == 3 and len(parts[0]) >= 1: s_clean = s_clean.replace('.', '')
     try:
         res = float(s_clean)
         return -abs(res) if is_neg else res
-    except:
-        return 0.0
+    except: return 0.0
 
 def clamp_date(dt_val, min_d, max_d):
-    if not isinstance(dt_val, datetime.date):
-        return max_d
-    if dt_val < min_d: return min_d
-    if dt_val > max_d: return max_d
-    return dt_val
+    if not isinstance(dt_val, datetime.date): return max_d
+    return max(min_d, min(dt_val, max_d))
 
 def hitung_satpam_keuangan(target_omzet, donasi_masuk, biaya_iklan, kebutuhan_mushaf_pcs=None, leads_meta_val=None):
     target_omzet, donasi_masuk, biaya_iklan = float(target_omzet or 0), float(donasi_masuk or 0), float(biaya_iklan or 0)
     if not kebutuhan_mushaf_pcs or kebutuhan_mushaf_pcs <= 0:
         kebutuhan_mushaf_pcs = max(1, int(round(donasi_masuk / 99000.0))) if donasi_masuk > 0 else 1
     rofi_aktual = (donasi_masuk / biaya_iklan) if biaya_iklan > 0 else 0.0
-    roas_meta = (float(leads_meta_val) / biaya_iklan) if (biaya_iklan > 0 and leads_meta_val is not None and float(leads_meta_val) > 0) else (rofi_aktual * 0.70)
-    kurang_target = max(0.0, target_omzet - donasi_masuk)
-    subsidi_min_roas = max(0.0, (biaya_iklan * 1.52) - donasi_masuk)
-    target_crm_cs = max(kurang_target, subsidi_min_roas)
+    roas_meta = (float(leads_meta_val) / biaya_iklan) if (biaya_iklan > 0 and leads_meta_val is not None and float(leads_meta_val) > 0) else (rofi_aktual * 0.79)
+    target_crm_cs = max(max(0.0, target_omzet - donasi_masuk), max(0.0, (biaya_iklan * 1.52) - donasi_masuk))
     if rofi_aktual >= 2.63: status_roas, badge_type = "AMAN (Tier 3 >= 2.63x)", "green"
     elif rofi_aktual >= 1.52: status_roas, badge_type = "WASPADA (Tier 1/2)", "orange"
     else: status_roas, badge_type = "KRITIS (< 1.52x • Wajib Subsidi CRM)", "red"
     profit_iklan = donasi_masuk - biaya_iklan
     beban_ops_10 = 0.10 * donasi_masuk
     dsd = donasi_masuk - biaya_iklan - beban_ops_10
-    alokasi_mushaf_65 = 0.65 * dsd
-    cadangan_cashback_35 = 0.35 * dsd
+    alokasi_mushaf_65, cadangan_cashback_35 = 0.65 * dsd, 0.35 * dsd
     plafon_hpp = (alokasi_mushaf_65 / kebutuhan_mushaf_pcs) if kebutuhan_mushaf_pcs > 0 else 0.0
     if plafon_hpp >= 33500: rekom_tier = "Tier 3: Hard Cover Premium (~Rp 33.500)"
     elif plafon_hpp >= 26000: rekom_tier = "Tier 2: Mushaf Standar (~Rp 26.000)"
@@ -128,30 +111,28 @@ def hitung_satpam_keuangan(target_omzet, donasi_masuk, biaya_iklan, kebutuhan_mu
     else: rekom_tier = "Defisit HPP (< Rp 20rb) • Gunakan Cadangan 35% & Kejar CRM"
     return {
         "roas_aktual": rofi_aktual, "rofi_aktual": rofi_aktual, "roas_meta": roas_meta,
-        "status_roas": status_roas, "badge_type": badge_type,
-        "target_crm_cs": target_crm_cs, "profit_iklan": profit_iklan, "beban_ops_10": beban_ops_10,
-        "dsd": dsd, "alokasi_mushaf_65": alokasi_mushaf_65, "cadangan_cashback_35": cadangan_cashback_35,
-        "plafon_hpp": plafon_hpp, "rekom_tier": rekom_tier, "sisa_bersih": dsd - (kebutuhan_mushaf_pcs * 20000.0),
-        "kebutuhan_mushaf_pcs": int(kebutuhan_mushaf_pcs)
+        "status_roas": status_roas, "badge_type": badge_type, "target_crm_cs": target_crm_cs,
+        "profit_iklan": profit_iklan, "beban_ops_10": beban_ops_10, "dsd": dsd,
+        "alokasi_mushaf_65": alokasi_mushaf_65, "cadangan_cashback_35": cadangan_cashback_35,
+        "plafon_hpp": plafon_hpp, "rekom_tier": rekom_tier, "kebutuhan_mushaf_pcs": int(kebutuhan_mushaf_pcs)
     }
 
 # ==============================================================================
-# 3. KONFIGURASI 4 AKUN LOGIN (RBAC) & 16 ID GOOGLE SHEETS
+# 3. KONFIGURASI AKUN LOGIN & 16 ID GOOGLE SHEETS
 # ==============================================================================
+ALL_MENUS = ["Dashboard Overview", "Donasi & Satpam Keuangan", "Performa CS & Leads", "Logistik & Gudang", "Kalender Distribusi", "Database & WA Blast"]
 AUTH_USERS = {
-    "amalqu": {"key": "amalqu", "username_display": "Amalqu", "pw": "Allah1ahad", "role": "Admin", "title": "Super Administrator", "menus": ["Dashboard Overview", "Donasi & Satpam Keuangan", "Performa CS & Leads", "Logistik & Gudang", "Kalender Distribusi", "Database & WA Blast"]},
-    "finance": {"key": "finance", "username_display": "Finance", "pw": "timfinancejaya99", "role": "Finance", "title": "Divisi Finance & Audit", "menus": ["Dashboard Overview", "Donasi & Satpam Keuangan", "Performa CS & Leads", "Logistik & Gudang", "Kalender Distribusi", "Database & WA Blast"]},
-    "advertiser": {"key": "advertiser", "username_display": "Advertiser", "pw": "ngiklangacor99", "role": "Advertiser", "title": "Divisi Digital Ads & Funnel", "menus": ["Dashboard Overview", "Donasi & Satpam Keuangan", "Performa CS & Leads"]},
-    "warehouse": {"key": "warehouse", "username_display": "Warehouse", "pw": "amansulaiman123", "role": "Warehouse", "title": "Divisi Gudang & Distribusi", "menus": ["Logistik & Gudang", "Kalender Distribusi"]}
+    "amalqu":     {"key": "amalqu", "username_display": "Amalqu", "pw": "Allah1ahad", "role": "Admin", "title": "Super Administrator", "menus": ALL_MENUS},
+    "finance":    {"key": "finance", "username_display": "Finance", "pw": "timfinancejaya99", "role": "Finance", "title": "Divisi Finance & Audit", "menus": ALL_MENUS},
+    "advertiser": {"key": "advertiser", "username_display": "Advertiser", "pw": "ngiklangacor99", "role": "Advertiser", "title": "Divisi Digital Ads & Funnel", "menus": ALL_MENUS[:3]},
+    "warehouse":  {"key": "warehouse", "username_display": "Warehouse", "pw": "amansulaiman123", "role": "Warehouse", "title": "Divisi Gudang & Distribusi", "menus": ALL_MENUS[3:5]}
 }
 
 if st.session_state.auth_user is None:
     try:
         qp_u = str(st.query_params.get("u", "")).strip().lower()
-        if qp_u in AUTH_USERS:
-            st.session_state.auth_user = AUTH_USERS[qp_u]
-    except:
-        pass
+        if qp_u in AUTH_USERS: st.session_state.auth_user = AUTH_USERS[qp_u]
+    except: pass
 
 SHEETS_CONFIG = {
     "leads_cs":        ("11xL6IWq9D_kmgYicQUDI-CH8crpk43GnnJ-pT1M6Lkw", "1318371393"),
@@ -172,155 +153,133 @@ SHEETS_CONFIG = {
     "bulan_oktober":   ("10UJz62vYB4m86TC_WbOIfbgUYLp8gnfFo8-nNk_W180", "170644840"),
 }
 
-def fetch_fast_grid(key_name, sheet_name=None, use_gid_first=True):
+def read_csv_nocache(url: str):
+    req = urllib.request.Request(url, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache", "Expires": "0",
+        "User-Agent": f"AmalQu-Live/{int(time.time()*1000)}"
+    })
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        return pd.read_csv(io.BytesIO(resp.read()), header=None, dtype=str).fillna("")
+
+def fetch_fast_grid(key_name, sheet_name=None, prefer_sheet=True):
     if key_name not in SHEETS_CONFIG: return pd.DataFrame()
     sid, gid = SHEETS_CONFIG[key_name]
     cb = int(time.time() * 1000)
     base = f"https://docs.google.com/spreadsheets/d/{sid}"
     urls = []
-    if use_gid_first:
-        urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&gid={gid}&cb={cb}")
-        urls.append(f"{base}/export?format=csv&gid={gid}&cb={cb}")
-    if sheet_name:
+    if sheet_name and prefer_sheet:
         urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&sheet={quote(sheet_name)}&cb={cb}")
-    if not use_gid_first:
-        urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&gid={gid}&cb={cb}")
-        urls.append(f"{base}/export?format=csv&gid={gid}&cb={cb}")
+    urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&gid={gid}&cb={cb}")
+    urls.append(f"{base}/export?format=csv&gid={gid}&cb={cb}")
+    if sheet_name and not prefer_sheet:
+        urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&sheet={quote(sheet_name)}&cb={cb}")
     for u in urls:
         try:
-            df = pd.read_csv(u, header=None, dtype=str).fillna("")
+            df = read_csv_nocache(u)
             if not df.empty and df.shape[1] >= 2:
                 fc = str(df.iat[0, 0]).strip().lower()
-                if "<!doctype" not in fc and "<html" not in fc:
-                    return df
-        except:
-            continue
+                if "<!doctype" not in fc and "<html" not in fc: return df
+        except: continue
     return pd.DataFrame()
 
 # ==============================================================================
-# 4. PRECISION CSS SYSTEM
+# 4. CSS SYSTEM & LOGIN GATE
 # ==============================================================================
 is_dark = st.session_state.dark_mode
-if is_dark:
-    css_vars = ":root { --bg-main:#0B0F19; --bg-card:#111827; --bg-subcard:#1A2333; --bg-input:#1E293B; --text-primary:#F8FAFC; --text-secondary:#CBD5E1; --text-muted:#94A3B8; --border-soft:#1E293B; --border-strong:#334155; --table-head:#1E293B; --table-hover:#1E293B; --cal-active-bg:linear-gradient(180deg, rgba(249,115,22,0.18) 0%, #111827 100%); --cal-pill-bg:#1E293B; }"
-else:
-    css_vars = ":root { --bg-main:#F4F7FE; --bg-card:#FFFFFF; --bg-subcard:#F8FAFC; --bg-input:#FFFFFF; --text-primary:#0F172A; --text-secondary:#475569; --text-muted:#64748B; --border-soft:#E2E8F0; --border-strong:#CBD5E1; --table-head:#F8FAFC; --table-hover:#F1F5F9; --cal-active-bg:linear-gradient(180deg, #FFF7ED 0%, #FFFFFF 100%); --cal-pill-bg:#FFFFFF; }"
-
-hide_sidebar_css = "section[data-testid='stSidebar'], [data-testid='collapsedControl'] { display:none !important; }" if st.session_state.auth_user is None else ""
+css_vars = (
+    ":root{--bg-main:#0B0F19;--bg-card:#111827;--bg-subcard:#1A2333;--bg-input:#1E293B;--text-primary:#F8FAFC;--text-secondary:#CBD5E1;--text-muted:#94A3B8;--border-soft:#1E293B;--border-strong:#334155;--table-head:#1E293B;--table-hover:#1E293B;--cal-active-bg:linear-gradient(180deg,rgba(249,115,22,0.18) 0%,#111827 100%);--cal-pill-bg:#1E293B;}"
+    if is_dark else
+    ":root{--bg-main:#F4F7FE;--bg-card:#FFFFFF;--bg-subcard:#F8FAFC;--bg-input:#FFFFFF;--text-primary:#0F172A;--text-secondary:#475569;--text-muted:#64748B;--border-soft:#E2E8F0;--border-strong:#CBD5E1;--table-head:#F8FAFC;--table-hover:#F1F5F9;--cal-active-bg:linear-gradient(180deg,#FFF7ED 0%,#FFFFFF 100%);--cal-pill-bg:#FFFFFF;}"
+)
+hide_sb = "section[data-testid='stSidebar'],[data-testid='collapsedControl']{display:none!important;}" if st.session_state.auth_user is None else ""
 
 render_html(f"""
 <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-{css_vars}
-{hide_sidebar_css}
-footer, [data-testid="stFooter"], [data-testid="stStatusWidget"] {{ display:none !important; }}
-[data-testid="stHeader"] {{ background-color:transparent !important; height:2rem !important; }}
-.stApp, [data-testid="stAppViewContainer"] {{ background-color:var(--bg-main) !important; color:var(--text-primary) !important; }}
-body, p, label, input, th, td, li {{ font-family:'Plus Jakarta Sans', -apple-system, sans-serif !important; color:var(--text-primary); }}
-h1, h2, h3, h4, h5, h6, .metric-num, .brand-title {{ font-family:'Outfit', sans-serif !important; color:var(--text-primary) !important; }}
-[data-testid="stIconMaterial"], .material-symbols-rounded, span[translate="no"] {{ font-family:'Material Symbols Rounded' !important; font-weight:normal !important; font-style:normal !important; }}
-i[class^="ri-"], i[class*=" ri-"] {{ font-family:'remixicon' !important; font-style:normal !important; }}
-.block-container {{ padding-top:1.2rem !important; padding-bottom:2rem !important; max-width:1440px !important; }}
-section[data-testid="stSidebar"] {{ background-color:var(--bg-card) !important; border-right:1px solid var(--border-soft) !important; width:265px !important; }}
-.sub-box {{ background:var(--bg-subcard); border:1px solid var(--border-soft); }}
-section[data-testid="stSidebar"] div[role="radiogroup"] {{ gap:6px !important; display:flex !important; flex-direction:column !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"] {{ background:transparent !important; border:1px solid transparent !important; border-radius:12px !important; padding:11px 16px !important; margin:0 !important; cursor:pointer !important; width:100% !important; transition:all 0.15s ease !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"] > div:not([data-testid="stMarkdownContainer"]), section[data-testid="stSidebar"] label[data-baseweb="radio"] input {{ display:none !important; width:0 !important; height:0 !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover {{ background:var(--bg-subcard) !important; border-color:var(--border-soft) !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"] p {{ font-size:13.5px !important; font-weight:600 !important; color:var(--text-secondary) !important; margin:0 !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {{ background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%) !important; box-shadow:0 6px 16px rgba(249,115,22,0.28) !important; }}
-section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p {{ color:#FFFFFF !important; font-weight:700 !important; }}
-div[data-testid="stMainBlockContainer"] div[role="radiogroup"] {{ background:var(--bg-subcard) !important; padding:5px !important; border-radius:12px !important; display:flex !important; flex-wrap:wrap !important; gap:6px !important; border:1px solid var(--border-soft) !important; }}
-div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] {{ background:transparent !important; padding:7px 14px !important; border-radius:9px !important; cursor:pointer !important; margin:0 !important; }}
-div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] > div:not([data-testid="stMarkdownContainer"]), div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] input {{ display:none !important; }}
-div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] p {{ font-size:12.5px !important; font-weight:600 !important; color:var(--text-secondary) !important; margin:0 !important; }}
-div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked) {{ background:var(--bg-card) !important; border:1px solid var(--border-strong) !important; box-shadow:0 2px 8px rgba(0,0,0,0.08) !important; }}
-div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked) p {{ color:#FF6B4A !important; font-weight:700 !important; }}
-div[data-baseweb="select"] > div, div[data-baseweb="input"] > div, div[data-baseweb="base-input"] {{ background-color:var(--bg-input) !important; border:1px solid var(--border-strong) !important; border-radius:11px !important; color:var(--text-primary) !important; }}
-div[data-baseweb="select"] span, div[data-baseweb="input"] input, div[data-testid="stWidgetLabel"] p {{ color:var(--text-primary) !important; font-weight:600 !important; font-size:13px !important; }}
-div[data-baseweb="popover"], ul[role="listbox"], li[role="option"] {{ background-color:var(--bg-card) !important; color:var(--text-primary) !important; }}
-li[role="option"]:hover {{ background-color:var(--bg-subcard) !important; }}
-button[kind="primary"], button[kind="secondary"], [data-testid="stDownloadButton"] button {{ background:var(--bg-card) !important; color:var(--text-primary) !important; border:1px solid var(--border-strong) !important; border-radius:12px !important; font-weight:700 !important; padding:8px 14px !important; }}
-[data-testid="stFormSubmitButton"] button {{ background:linear-gradient(135deg, #FF6B4A 0%, #F97316 100%) !important; color:#FFFFFF !important; border:none !important; border-radius:12px !important; padding:11px 18px !important; }}
-[data-testid="stFormSubmitButton"] button p {{ color:#FFFFFF !important; font-weight:700 !important; font-size:14px !important; }}
-.bento-card, [data-testid="stForm"] {{ background:var(--bg-card) !important; border:1px solid var(--border-soft) !important; border-radius:18px !important; padding:18px 20px !important; box-shadow:0 4px 18px -2px rgba(0,0,0,0.05) !important; margin-bottom:14px !important; }}
-.kpi-uniform {{ height:148px; display:flex; flex-direction:column; justify-content:space-between; }}
-.hero-card {{ background:linear-gradient(135deg, #4F46E5 0%, #6366F1 55%, #8B5CF6 100%); border-radius:18px; padding:18px 20px; height:148px; display:flex; flex-direction:column; justify-content:space-between; color:#FFFFFF !important; box-shadow:0 10px 24px -6px rgba(79,70,229,0.4); margin-bottom:14px; }}
-.hero-card * {{ color:#FFFFFF !important; }}
-.chart-header-box {{ background:var(--bg-card); border:1px solid var(--border-soft); border-bottom:none; border-radius:18px 18px 0 0; padding:16px 20px 8px 20px; margin-bottom:-16px; position:relative; z-index:2; }}
-[data-testid="stPlotlyChart"] {{ background:var(--bg-card) !important; border:1px solid var(--border-soft) !important; border-top:none !important; border-radius:0 0 18px 18px !important; padding:4px 12px 8px 12px !important; margin-bottom:14px !important; }}
-.icon-box {{ width:36px; height:36px; border-radius:10px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; font-size:17px; }}
-.ib-indigo {{ background:rgba(79,70,229,0.15); color:#6366F1 !important; }}
-.ib-orange {{ background:rgba(249,115,22,0.15); color:#F97316 !important; }}
-.ib-emerald {{ background:rgba(16,185,129,0.15); color:#10B981 !important; }}
-.ib-rose {{ background:rgba(239,68,68,0.15); color:#EF4444 !important; }}
-.badge-pill {{ font-size:10.5px; font-weight:700; padding:3.5px 9px; border-radius:99px; display:inline-flex; align-items:center; gap:4px; white-space:nowrap !important; flex-shrink:0; }}
-.bp-green {{ background:rgba(16,185,129,0.16); color:#10B981 !important; }}
-.bp-red {{ background:rgba(239,68,68,0.16); color:#EF4444 !important; }}
-.bp-orange {{ background:rgba(249,115,22,0.16); color:#F97316 !important; }}
-.bp-indigo {{ background:rgba(79,70,229,0.16); color:#6366F1 !important; }}
-.nowrap-val {{ white-space:nowrap !important; font-weight:700; }}
-.saas-table-wrap {{ background:var(--bg-card); border:1px solid var(--border-soft); border-radius:18px; overflow-x:auto; margin-top:8px; margin-bottom:16px; }}
-.saas-table {{ width:100%; border-collapse:collapse; text-align:left; font-size:12.5px; }}
-.saas-table thead tr {{ background:var(--table-head); border-bottom:1px solid var(--border-soft); }}
-.saas-table th {{ padding:11px 14px; font-size:11px; font-weight:700; text-transform:uppercase; color:var(--text-muted) !important; white-space:nowrap; }}
-.saas-table td {{ padding:11px 14px; color:var(--text-primary) !important; font-weight:500; border-bottom:1px solid var(--border-soft); white-space:nowrap; }}
-.saas-table tbody tr:hover {{ background:var(--table-hover); }}
-.row-summary {{ background:rgba(16,185,129,0.09) !important; font-weight:700 !important; }}
-.row-grand {{ background:rgba(79,70,229,0.14) !important; font-weight:800 !important; }}
-.cal-desktop-only {{ display:block; }}
-.cal-mobile-only {{ display:none; }}
-.cal-grid-7 {{ display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); gap:8px; margin-top:12px; }}
-.cal-head-cell {{ text-align:center; font-size:11px; font-weight:700; color:var(--text-muted) !important; background:var(--bg-subcard); padding:8px 4px; border-radius:8px; border:1px solid var(--border-soft); }}
-.cal-cell {{ background:var(--bg-card); border:1px solid var(--border-soft); border-radius:12px; min-height:96px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; }}
-.cal-cell-empty {{ background:var(--bg-subcard); border:1px dashed var(--border-soft); border-radius:12px; min-height:96px; opacity:0.45; }}
-.cal-cell-active {{ background:var(--cal-active-bg); border:1.5px solid #FB923C; border-radius:12px; min-height:96px; padding:8px 10px; }}
-.cal-day-num {{ font-family:'Outfit', sans-serif !important; font-size:13px; font-weight:700; color:var(--text-primary) !important; display:flex; justify-content:space-between; align-items:center; gap:4px; }}
-.cal-item-pill {{ background:var(--cal-pill-bg); border:1px solid var(--border-soft); border-left:3px solid #F97316; border-radius:6px; padding:4px 6px; margin-top:4px; font-size:10.5px; color:var(--text-primary) !important; line-height:1.25; }}
-@media screen and (max-width: 768px) {{
-    .block-container {{ padding-left:12px !important; padding-right:12px !important; padding-top:2.8rem !important; }}
-    div[data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; }}
-    div[data-testid="column"] {{ width:100% !important; flex:1 1 100% !important; min-width:100% !important; }}
-    .kpi-uniform, .hero-card {{ height:auto !important; min-height:132px !important; }}
-    .cal-desktop-only {{ display:none !important; }}
-    .cal-mobile-only {{ display:block !important; }}
-}}
+{css_vars}{hide_sb}
+footer,[data-testid="stFooter"],[data-testid="stStatusWidget"]{{display:none!important;}}
+[data-testid="stHeader"]{{background:transparent!important;height:2rem!important;}}
+.stApp,[data-testid="stAppViewContainer"]{{background-color:var(--bg-main)!important;color:var(--text-primary)!important;}}
+body,p,label,input,th,td,li{{font-family:'Plus Jakarta Sans',sans-serif!important;color:var(--text-primary);}}
+h1,h2,h3,h4,h5,h6,.metric-num,.brand-title{{font-family:'Outfit',sans-serif!important;color:var(--text-primary)!important;}}
+[data-testid="stIconMaterial"],.material-symbols-rounded,span[translate="no"]{{font-family:'Material Symbols Rounded'!important;}}
+i[class^="ri-"],i[class*=" ri-"]{{font-family:'remixicon'!important;font-style:normal!important;}}
+.block-container{{padding-top:1.2rem!important;padding-bottom:2rem!important;max-width:1440px!important;}}
+section[data-testid="stSidebar"]{{background-color:var(--bg-card)!important;border-right:1px solid var(--border-soft)!important;width:265px!important;}}
+.sub-box{{background:var(--bg-subcard);border:1px solid var(--border-soft);}}
+section[data-testid="stSidebar"] div[role="radiogroup"]{{gap:6px!important;display:flex!important;flex-direction:column!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]{{background:transparent!important;border:1px solid transparent!important;border-radius:12px!important;padding:11px 16px!important;margin:0!important;cursor:pointer!important;width:100%!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]>div:not([data-testid="stMarkdownContainer"]),section[data-testid="stSidebar"] label[data-baseweb="radio"] input{{display:none!important;width:0!important;height:0!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover{{background:var(--bg-subcard)!important;border-color:var(--border-soft)!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"] p{{font-size:13.5px!important;font-weight:600!important;color:var(--text-secondary)!important;margin:0!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked){{background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%)!important;box-shadow:0 6px 16px rgba(249,115,22,0.28)!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p{{color:#FFFFFF!important;font-weight:700!important;}}
+div[data-testid="stMainBlockContainer"] div[role="radiogroup"]{{background:var(--bg-subcard)!important;padding:5px!important;border-radius:12px!important;display:flex!important;flex-wrap:wrap!important;gap:6px!important;border:1px solid var(--border-soft)!important;}}
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]{{background:transparent!important;padding:7px 14px!important;border-radius:9px!important;cursor:pointer!important;margin:0!important;}}
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]>div:not([data-testid="stMarkdownContainer"]),div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] input{{display:none!important;}}
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"] p{{font-size:12.5px!important;font-weight:600!important;color:var(--text-secondary)!important;margin:0!important;}}
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked){{background:var(--bg-card)!important;border:1px solid var(--border-strong)!important;}}
+div[data-testid="stMainBlockContainer"] label[data-baseweb="radio"]:has(input:checked) p{{color:#FF6B4A!important;font-weight:700!important;}}
+div[data-baseweb="select"]>div,div[data-baseweb="input"]>div,div[data-baseweb="base-input"]{{background-color:var(--bg-input)!important;border:1px solid var(--border-strong)!important;border-radius:11px!important;color:var(--text-primary)!important;}}
+div[data-baseweb="select"] span,div[data-baseweb="input"] input,div[data-testid="stWidgetLabel"] p{{color:var(--text-primary)!important;font-weight:600!important;font-size:13px!important;}}
+div[data-baseweb="popover"],ul[role="listbox"],li[role="option"]{{background-color:var(--bg-card)!important;color:var(--text-primary)!important;}}
+button[kind="primary"],button[kind="secondary"],[data-testid="stDownloadButton"] button{{background:var(--bg-card)!important;color:var(--text-primary)!important;border:1px solid var(--border-strong)!important;border-radius:12px!important;font-weight:700!important;padding:8px 14px!important;}}
+[data-testid="stFormSubmitButton"] button{{background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%)!important;color:#FFFFFF!important;border:none!important;border-radius:12px!important;padding:11px 18px!important;}}
+[data-testid="stFormSubmitButton"] button p{{color:#FFFFFF!important;font-weight:700!important;}}
+.bento-card,[data-testid="stForm"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-radius:18px!important;padding:18px 20px!important;box-shadow:0 4px 18px -2px rgba(0,0,0,0.05)!important;margin-bottom:14px!important;}}
+.kpi-uniform{{height:148px;display:flex;flex-direction:column;justify-content:space-between;}}
+.hero-card{{background:linear-gradient(135deg,#4F46E5 0%,#6366F1 55%,#8B5CF6 100%);border-radius:18px;padding:18px 20px;height:148px;display:flex;flex-direction:column;justify-content:space-between;color:#FFFFFF!important;box-shadow:0 10px 24px -6px rgba(79,70,229,0.4);margin-bottom:14px;}}
+.hero-card *{{color:#FFFFFF!important;}}
+.chart-header-box{{background:var(--bg-card);border:1px solid var(--border-soft);border-bottom:none;border-radius:18px 18px 0 0;padding:16px 20px 8px 20px;margin-bottom:-16px;position:relative;z-index:2;}}
+[data-testid="stPlotlyChart"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-top:none!important;border-radius:0 0 18px 18px!important;padding:4px 12px 8px 12px!important;margin-bottom:14px!important;}}
+.icon-box{{width:36px;height:36px;border-radius:10px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:17px;}}
+.ib-indigo{{background:rgba(79,70,229,0.15);color:#6366F1!important;}}.ib-orange{{background:rgba(249,115,22,0.15);color:#F97316!important;}}.ib-emerald{{background:rgba(16,185,129,0.15);color:#10B981!important;}}.ib-rose{{background:rgba(239,68,68,0.15);color:#EF4444!important;}}
+.badge-pill{{font-size:10.5px;font-weight:700;padding:3.5px 9px;border-radius:99px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap!important;flex-shrink:0;}}
+.bp-green{{background:rgba(16,185,129,0.16);color:#10B981!important;}}.bp-red{{background:rgba(239,68,68,0.16);color:#EF4444!important;}}.bp-orange{{background:rgba(249,115,22,0.16);color:#F97316!important;}}.bp-indigo{{background:rgba(79,70,229,0.16);color:#6366F1!important;}}
+.nowrap-val{{white-space:nowrap!important;font-weight:700;}}
+.saas-table-wrap{{background:var(--bg-card);border:1px solid var(--border-soft);border-radius:18px;overflow-x:auto;margin-top:8px;margin-bottom:16px;}}
+.saas-table{{width:100%;border-collapse:collapse;text-align:left;font-size:12.5px;}}
+.saas-table thead tr{{background:var(--table-head);border-bottom:1px solid var(--border-soft);}}
+.saas-table th{{padding:11px 14px;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-muted)!important;white-space:nowrap;}}
+.saas-table td{{padding:11px 14px;color:var(--text-primary)!important;font-weight:500;border-bottom:1px solid var(--border-soft);white-space:nowrap;}}
+.saas-table tbody tr:hover{{background:var(--table-hover);}}
+.row-summary{{background:rgba(16,185,129,0.09)!important;font-weight:700!important;}}
+.row-grand{{background:rgba(79,70,229,0.14)!important;font-weight:800!important;}}
+.cal-desktop-only{{display:block;}}.cal-mobile-only{{display:none;}}
+.cal-grid-7{{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-top:12px;}}
+.cal-head-cell{{text-align:center;font-size:11px;font-weight:700;color:var(--text-muted)!important;background:var(--bg-subcard);padding:8px 4px;border-radius:8px;border:1px solid var(--border-soft);}}
+.cal-cell{{background:var(--bg-card);border:1px solid var(--border-soft);border-radius:12px;min-height:96px;padding:8px 10px;display:flex;flex-direction:column;justify-content:space-between;}}
+.cal-cell-empty{{background:var(--bg-subcard);border:1px dashed var(--border-soft);border-radius:12px;min-height:96px;opacity:0.45;}}
+.cal-cell-active{{background:var(--cal-active-bg);border:1.5px solid #FB923C;border-radius:12px;min-height:96px;padding:8px 10px;}}
+.cal-day-num{{font-family:'Outfit',sans-serif!important;font-size:13px;font-weight:700;color:var(--text-primary)!important;display:flex;justify-content:space-between;align-items:center;gap:4px;}}
+.cal-item-pill{{background:var(--cal-pill-bg);border:1px solid var(--border-soft);border-left:3px solid #F97316;border-radius:6px;padding:4px 6px;margin-top:4px;font-size:10.5px;color:var(--text-primary)!important;line-height:1.25;}}
+@media screen and (max-width:768px){{.block-container{{padding-left:12px!important;padding-right:12px!important;padding-top:2.8rem!important;}}div[data-testid="stHorizontalBlock"]{{flex-wrap:wrap!important;}}div[data-testid="column"]{{width:100%!important;flex:1 1 100%!important;min-width:100%!important;}}.kpi-uniform,.hero-card{{height:auto!important;min-height:132px!important;}}.cal-desktop-only{{display:none!important;}}.cal-mobile-only{{display:block!important;}}}}
 </style>
 """)
 
-# ==============================================================================
-# 5. HALAMAN GERBANG LOGIN
-# ==============================================================================
 if st.session_state.auth_user is None:
-    top_sp1, top_sp2 = st.columns([8.5, 1])
+    _, top_sp2 = st.columns([8.5, 1])
     with top_sp2:
         if st.button("☀️ Terang" if is_dark else "🌙 Gelap", key="login_theme_btn", use_container_width=True):
             st.session_state.dark_mode = not st.session_state.dark_mode
             st.rerun()
     _, login_col, _ = st.columns([1.3, 1.4, 1.3])
     with login_col:
-        render_html(f"""
-        <div style="text-align:center; margin-top:16px; margin-bottom:18px;">
-            <div style="margin-bottom:12px;">{build_logo_html(68)}</div>
-            <div style="font-family:'Outfit',sans-serif !important; font-size:30px; font-weight:800;">AmalQu</div>
-            <div style="font-size:13px; font-weight:600; color:var(--text-secondary) !important; margin-top:4px;">Yayasan AmalQu Indonesia Peduli • Command Center</div>
-        </div>
-        """)
+        render_html(f'<div style="text-align:center;margin-top:16px;margin-bottom:18px;"><div style="margin-bottom:12px;">{build_logo_html(68)}</div><div style="font-family:\'Outfit\',sans-serif!important;font-size:30px;font-weight:800;">AmalQu</div><div style="font-size:13px;font-weight:600;color:var(--text-secondary)!important;margin-top:4px;">Yayasan AmalQu Indonesia Peduli • Command Center</div></div>')
         with st.form("amalqu_login_form", clear_on_submit=False):
-            render_html('<div style="text-align:center; margin-bottom:14px;"><div style="font-family:\'Outfit\',sans-serif !important; font-size:17px; font-weight:700;"><i class="ri-shield-keyhole-line" style="color:#FF6B4A !important;"></i> Portal Akses Resmi Divisi</div><div style="font-size:12px; color:var(--text-muted) !important; margin-top:2px;">Silakan masuk menggunakan ID dan Password divisi Anda</div></div>')
+            render_html('<div style="text-align:center;margin-bottom:14px;"><div style="font-family:\'Outfit\',sans-serif!important;font-size:17px;font-weight:700;"><i class="ri-shield-keyhole-line" style="color:#FF6B4A!important;"></i> Portal Akses Resmi Divisi</div><div style="font-size:12px;color:var(--text-muted)!important;margin-top:2px;">Silakan masuk menggunakan ID dan Password divisi Anda</div></div>')
             inp_user = st.text_input("ID Pengguna (Username)", placeholder="Ketik ID: Amalqu / Finance / Advertiser / Warehouse")
             inp_pass = st.text_input("Password", type="password", placeholder="Ketik Password Divisi Anda")
-            submit_login = st.form_submit_button("Masuk ke Command Center", use_container_width=True)
-            if submit_login:
-                u_clean, p_clean = str(inp_user).strip().lower(), str(inp_pass).strip()
-                if u_clean in AUTH_USERS and AUTH_USERS[u_clean]["pw"] == p_clean:
-                    st.session_state.auth_user = AUTH_USERS[u_clean]
-                    try: st.query_params["u"] = u_clean
+            if st.form_submit_button("Masuk ke Command Center", use_container_width=True):
+                u_c, p_c = str(inp_user).strip().lower(), str(inp_pass).strip()
+                if u_c in AUTH_USERS and AUTH_USERS[u_c]["pw"] == p_c:
+                    st.session_state.auth_user = AUTH_USERS[u_c]
+                    try: st.query_params["u"] = u_c
                     except: pass
                     st.rerun()
-                else:
-                    st.error("ID Pengguna atau Password salah.")
+                else: st.error("ID Pengguna atau Password salah.")
     st.stop()
 
 current_user = st.session_state.auth_user
@@ -328,7 +287,7 @@ user_role = current_user.get("role", "Admin")
 allowed_menus = current_user.get("menus", ["Dashboard Overview"])
 
 # ==============================================================================
-# 6. PARSER UNIVERSAL UNTUK TEMPLATE BARU DASHBOARD CS, STOK & DATABASE
+# 5. MERGE-SAFE PARSERS UNTUK DASHBOARD CS, STOK MUSHAF & DATABASE
 # ==============================================================================
 def extract_anchored_table(df_raw, anchor1, anchor2=None, stop_words=None, max_rows=100, max_cols=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
@@ -340,13 +299,16 @@ def extract_anchored_table(df_raw, anchor1, anchor2=None, stop_words=None, max_r
             if val.lower() == anchor1.lower() or (anchor1.lower() in val.lower() and len(val) <= len(anchor1) + 12):
                 if anchor2 is None:
                     start_r, start_c = r, c; break
-                elif c + 1 < ncols and anchor2.lower() in str(df_raw.iat[r, c+1]).strip().lower():
-                    start_r, start_c = r, c; break
+                else:
+                    for cn in range(c + 1, min(ncols, c + 4)):
+                        if anchor2.lower() in str(df_raw.iat[r, cn]).strip().lower():
+                            start_r, start_c = r, c; break
+                    if start_r is not None: break
         if start_r is not None: break
     if start_r is None: return pd.DataFrame()
     headers, end_c = [], start_c
-    col_limit = min(ncols, start_c + max_cols) if max_cols else ncols
-    while end_c < col_limit:
+    col_lim = min(ncols, start_c + max_cols) if max_cols else ncols
+    while end_c < col_lim:
         h = re.sub(r'\s+', ' ', str(df_raw.iat[start_r, end_c])).strip()
         if h == "" or h.lower().startswith("unnamed"): break
         headers.append(h); end_c += 1
@@ -399,31 +361,39 @@ def parse_rekap_harian_cs_2row(grid_okt):
     return pd.DataFrame(rows)
 
 def parse_monitoring_roas_finance(grid_okt):
-    res = {}
-    if grid_okt is None or grid_okt.empty: return res
-    t_mon = extract_anchored_table(grid_okt, "Metrik / Indikator", "Nilai", max_rows=10, max_cols=4)
-    if not t_mon.empty:
-        for _, row in t_mon.iterrows():
-            k = str(row.iloc[0]).strip().lower()
-            vn = num_clean(row.iloc[1]) if len(row) > 1 else 0.0
-            if "realisasi donasi finance" in k: res["realisasi_finance"] = vn
-            elif ("budget iklan" in k or "ad spend" in k) and "rata" not in k: res["budget_iklan"] = vn
-            elif "rofi real" in k: res["rofi_real"] = vn
-            elif "hari cut-off" in k: res["hari_cutoff"] = int(vn) if vn > 0 else 22
-            elif "rata-rata donasi" in k: res["avg_donasi_hari"] = vn
-            elif "rata-rata ad spend" in k: res["avg_ads_hari"] = vn
-            elif "estimasi donasi akhir bulan" in k: res["estimasi_akhir_bulan"] = vn
-    t_kan = extract_anchored_table(grid_okt, "Kanal / Metrik Donasi", "Nominal", max_rows=8, max_cols=4)
-    if not t_kan.empty:
-        for _, row in t_kan.iterrows():
-            k = str(row.iloc[0]).strip().lower()
-            r_val = num_clean(row.iloc[2]) if len(row) > 2 else 0.0
-            if "roas akuisisi" in k and r_val > 0: res["roas_akuisisi"] = r_val
-            elif "rofi cs closing" in k and r_val > 0: res["rofi_cs"] = r_val
-    return res
+    """Pemindai Anti-Merge untuk Kolom J-N (Monitoring ROAS Finance) dan Kolom B-H (Kanal/Metrik Donasi)."""
+    res, kanal_rows = {}, []
+    if grid_okt is None or grid_okt.empty: return res, pd.DataFrame()
+    nrows, ncols = grid_okt.shape
+    for r in range(nrows):
+        for c in range(ncols):
+            cell_txt = str(grid_okt.iat[r, c]).strip()
+            if not cell_txt: continue
+            kl = cell_txt.lower()
+            right_vals = [str(grid_okt.iat[r, cc]).strip() for cc in range(c + 1, min(ncols, c + 7)) if str(grid_okt.iat[r, cc]).strip() != ""]
+            if not right_vals: continue
+            v_num = num_clean(right_vals[0])
+            if "realisasi donasi finance" in kl and v_num > 0: res["realisasi_finance"] = v_num
+            elif ("budget iklan" in kl or "ad spend" in kl) and "rata" not in kl and v_num > 0: res["budget_iklan"] = v_num
+            elif "rofi real saat ini" in kl and v_num > 0: res["rofi_real"] = v_num
+            elif "hari cut-off berjalan" in kl and v_num > 0: res["hari_cutoff"] = int(v_num)
+            elif "rata-rata donasi / hari" in kl and v_num > 0: res["avg_donasi_hari"] = v_num
+            elif "rata-rata ad spend / hari" in kl and v_num > 0: res["avg_ads_hari"] = v_num
+            elif "estimasi donasi akhir bulan" in kl and v_num > 0: res["estimasi_akhir_bulan"] = v_num
+            elif kl in ["total leads meta", "total crm (repeat order)", "total sedekah lainnya", "roas akuisisi (leads meta)", "rofi cs closing (leads + crm)"]:
+                nom_s = right_vals[0] if len(right_vals) >= 1 else "-"
+                ras_s = right_vals[1] if len(right_vals) >= 2 else "-"
+                ket_s = right_vals[2] if len(right_vals) >= 3 else ""
+                kanal_rows.append({"Kanal / Metrik Donasi": cell_txt, "Nominal": nom_s, "% Kontribusi / Rasio": ras_s, "Keterangan & Analisis": ket_s})
+                if "roas akuisisi" in kl:
+                    rv = num_clean(ras_s) if num_clean(ras_s) > 0 else num_clean(nom_s)
+                    if rv > 0: res["roas_akuisisi"] = rv
+                elif "rofi cs closing" in kl:
+                    rv = num_clean(ras_s) if num_clean(ras_s) > 0 else num_clean(nom_s)
+                    if rv > 0: res["rofi_cs"] = rv
+    return res, (pd.DataFrame(kanal_rows) if kanal_rows else pd.DataFrame())
 
 def parse_stok_dashboard_new(grid_ms):
-    """Memotong tepat 5 kolom untuk Tabel Inventaris Kiri dan 5 kolom untuk Tabel Defisit Kanan agar bebas KeyError."""
     out = {}
     if grid_ms is None or grid_ms.empty: return out
     t_inv = extract_anchored_table(grid_ms, "Produk & Kategori", "Kanal Promosi", max_rows=10, max_cols=5)
@@ -441,24 +411,18 @@ def parse_stok_dashboard_new(grid_ms):
     return out
 
 def parse_setting_dashboard_crm(grid_db):
-    """Membaca tabel Segmentasi, Reminder, Status Donatur & KPI dari sheet SETTING DASHBOARD."""
     out = {}
     if grid_db is None or grid_db.empty: return out
     t_seg = extract_anchored_table(grid_db, "Prioritas", "Segmentasi", stop_words=["Status Reminder", "TOTAL"], max_rows=12, max_cols=5)
-    if t_seg.empty:
-        t_seg = extract_anchored_table(grid_db, "Kode", "Segmentasi", stop_words=["Status Reminder", "TOTAL"], max_rows=12, max_cols=5)
-    if not t_seg.empty and t_seg.shape[1] >= 4:
-        out["segmentasi"] = t_seg
+    if t_seg.empty: t_seg = extract_anchored_table(grid_db, "Kode", "Segmentasi", stop_words=["Status Reminder", "TOTAL"], max_rows=12, max_cols=5)
+    if not t_seg.empty and t_seg.shape[1] >= 4: out["segmentasi"] = t_seg
     t_rem = extract_anchored_table(grid_db, "Status Reminder", "Jumlah", stop_words=["Status Donatur", "TOTAL"], max_rows=8, max_cols=3)
-    if not t_rem.empty and t_rem.shape[1] >= 2:
-        out["reminder"] = t_rem
+    if not t_rem.empty and t_rem.shape[1] >= 2: out["reminder"] = t_rem
     t_stat = extract_anchored_table(grid_db, "Status Donatur", "Jumlah", stop_words=["TOTAL"], max_rows=8, max_cols=3)
-    if not t_stat.empty and t_stat.shape[1] >= 2:
-        out["status_donatur"] = t_stat
+    if not t_stat.empty and t_stat.shape[1] >= 2: out["status_donatur"] = t_stat
     return out
 
 def parse_live_leads_tab(grid_cs, cs_label):
-    """Membaca baris harian Oktober pada sheet Pengelolaan Leads CS dan memprioritaskan bulan 10 (Oktober) agar tidak loncat ke Nov/Des."""
     if grid_cs is None or grid_cs.empty: return []
     rows_extracted = []
     nrows, ncols = grid_cs.shape
@@ -473,22 +437,16 @@ def parse_live_leads_tab(grid_cs, cs_label):
             m_text = re.search(r'(\d{1,2})\s*(?:okt|oct|oktober|october)', v, re.IGNORECASE)
             if m_iso:
                 pts = m_iso.group(1).split("-")
-                m_val, d_val = int(pts[1]), int(pts[2])
-                if m_val == 10 and 1 <= d_val <= 31:
-                    tgl_found, tgl_col_idx = f"2026-10-{d_val:02d}", c_idx; break
-                elif d_val == 10 and 1 <= m_val <= 31:
-                    tgl_found, tgl_col_idx = f"2026-10-{m_val:02d}", c_idx; break
+                m_v, d_v = int(pts[1]), int(pts[2])
+                if m_v == 10 and 1 <= d_v <= 31: tgl_found, tgl_col_idx = f"2026-10-{d_v:02d}", c_idx; break
+                elif d_v == 10 and 1 <= m_v <= 31: tgl_found, tgl_col_idx = f"2026-10-{m_v:02d}", c_idx; break
             elif m_slash:
                 p1, p2 = int(m_slash.group(1)), int(m_slash.group(2))
-                # Prioritaskan angka 10 sebagai bulan Oktober (baik format DD/MM/YYYY maupun MM/DD/YYYY)
-                if p2 == 10 and 1 <= p1 <= 31:
-                    tgl_found, tgl_col_idx = f"2026-10-{p1:02d}", c_idx; break
-                elif p1 == 10 and 1 <= p2 <= 31:
-                    tgl_found, tgl_col_idx = f"2026-10-{p2:02d}", c_idx; break
+                if p2 == 10 and 1 <= p1 <= 31: tgl_found, tgl_col_idx = f"2026-10-{p1:02d}", c_idx; break
+                elif p1 == 10 and 1 <= p2 <= 31: tgl_found, tgl_col_idx = f"2026-10-{p2:02d}", c_idx; break
             elif m_text:
                 dp = int(m_text.group(1))
-                if 1 <= dp <= 31:
-                    tgl_found, tgl_col_idx = f"2026-10-{dp:02d}", c_idx; break
+                if 1 <= dp <= 31: tgl_found, tgl_col_idx = f"2026-10-{dp:02d}", c_idx; break
         if tgl_found and tgl_col_idx is not None:
             bc = tgl_col_idx + 1
             def gn(off):
@@ -504,88 +462,91 @@ def parse_live_leads_tab(grid_cs, cs_label):
     return rows_extracted
 
 # ==============================================================================
-# 7. HIGH-SPEED PARALLEL DATA ENGINE (TTL 300s + LAZY DB LOAD)
+# 6. TRUE AUTO-SYNC ENGINE (REFRESH OTOMATIS TIAP 60 DETIK + INSTANT NONCE)
 # ==============================================================================
-@st.cache_data(ttl=300, show_spinner=False)
-def load_core_realtime_data():
+@st.cache_data(ttl=60, show_spinner=False)
+def load_core_realtime_data(sync_token: int):
     db, sync_status = {}, {}
 
-    db['macro_monthly'] = pd.DataFrame([
-        {"Bulan": "Januari",   "Target Bulanan": 326000000, "Realisasi Finance": 313838000, "Omset CS": 194267000, "Budget Iklan": 218457000, "Total Pengeluaran": 222889000, "Laba Bersih": 90949200,  "ROFI": 1.44, "ROI_Pct": 40.8,  "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 2356},
-        {"Bulan": "Februari",  "Target Bulanan": 522000000, "Realisasi Finance": 244568000, "Omset CS": 230443000, "Budget Iklan": 228843000, "Total Pengeluaran": 232374000, "Laba Bersih": 12194000,  "ROFI": 1.07, "ROI_Pct": 5.2,   "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 1906},
-        {"Bulan": "Maret",     "Target Bulanan": 835000000, "Realisasi Finance": 432950000, "Omset CS": 443374100, "Budget Iklan": 331054000, "Total Pengeluaran": 334504000, "Laba Bersih": 98446500,  "ROFI": 1.31, "ROI_Pct": 29.4,  "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 3814},
-        {"Bulan": "April",     "Target Bulanan": 359000000, "Realisasi Finance": 292695000, "Omset CS": 253733400, "Budget Iklan": 262156000, "Total Pengeluaran": 266465000, "Laba Bersih": 26230300,  "ROFI": 1.12, "ROI_Pct": 9.8,   "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 2225},
-        {"Bulan": "Mei",       "Target Bulanan": 395029000, "Realisasi Finance": 485195000, "Omset CS": 154142300, "Budget Iklan": 335053000, "Total Pengeluaran": 338597000, "Laba Bersih": 146597000, "ROFI": 1.45, "ROI_Pct": 43.3,  "Status Target": "Tercapai",       "Mushaf Terverifikasi": 1454},
-        {"Bulan": "Juni",      "Target Bulanan": 434532000, "Realisasi Finance": 457976000, "Omset CS": 408027750, "Budget Iklan": 345054000, "Total Pengeluaran": 356438000, "Laba Bersih": 101538000, "ROFI": 1.33, "ROI_Pct": 28.5,  "Status Target": "Tercapai",       "Mushaf Terverifikasi": 4103},
-        {"Bulan": "Juli",      "Target Bulanan": 477986000, "Realisasi Finance": 490683000, "Omset CS": 374520900, "Budget Iklan": 345049000, "Total Pengeluaran": 353467000, "Laba Bersih": 137216000, "ROFI": 1.42, "ROI_Pct": 38.8,  "Status Target": "Tercapai",       "Mushaf Terverifikasi": 3586},
-        {"Bulan": "Agustus",   "Target Bulanan": 525784000, "Realisasi Finance": 371847000, "Omset CS": 290718820, "Budget Iklan": 320040000, "Total Pengeluaran": 322971000, "Laba Bersih": 48876700,  "ROFI": 1.16, "ROI_Pct": 15.1,  "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 2852},
-        {"Bulan": "September", "Target Bulanan": 350000000, "Realisasi Finance": 310384000, "Omset CS": 272608400, "Budget Iklan": 254360000, "Total Pengeluaran": 107038000, "Laba Bersih": 203346000, "ROFI": 1.22, "ROI_Pct": 190.0, "Status Target": "Tidak Tercapai", "Mushaf Terverifikasi": 2599},
-        {"Bulan": "Oktober",   "Target Bulanan": 500000000, "Realisasi Finance": 223894384, "Omset CS": 186870457, "Budget Iklan": 188346708, "Total Pengeluaran": 188346708, "Laba Bersih": 35547676,  "ROFI": 1.19, "ROI_Pct": 18.9,  "Status Target": "Realtime",       "Mushaf Terverifikasi": 946},
-    ])
+    macro_rows = [
+        ("Januari",   326000000, 313838000, 194267000, 218457000, 222889000, 90949200,  1.44, 40.8,  "Tidak Tercapai", 2356),
+        ("Februari",  522000000, 244568000, 230443000, 228843000, 232374000, 12194000,  1.07, 5.2,   "Tidak Tercapai", 1906),
+        ("Maret",     835000000, 432950000, 443374100, 331054000, 334504000, 98446500,  1.31, 29.4,  "Tidak Tercapai", 3814),
+        ("April",     359000000, 292695000, 253733400, 262156000, 266465000, 26230300,  1.12, 9.8,   "Tidak Tercapai", 2225),
+        ("Mei",       395029000, 485195000, 154142300, 335053000, 338597000, 146597000, 1.45, 43.3,  "Tercapai",       1454),
+        ("Juni",      434532000, 457976000, 408027750, 345054000, 356438000, 101538000, 1.33, 28.5,  "Tercapai",       4103),
+        ("Juli",      477986000, 490683000, 374520900, 345049000, 353467000, 137216000, 1.42, 38.8,  "Tercapai",       3586),
+        ("Agustus",   525784000, 371847000, 290718820, 320040000, 322971000, 48876700,  1.16, 15.1,  "Tidak Tercapai", 2852),
+        ("September", 350000000, 310384000, 272608400, 254360000, 107038000, 203346000, 1.22, 190.0, "Tidak Tercapai", 2599),
+        ("Oktober",   500000000, 238587386, 192709457, 205020588, 205020588, 33566798,  1.16, 16.4,  "Realtime",       946),
+    ]
+    db['macro_monthly'] = pd.DataFrame(macro_rows, columns=["Bulan", "Target Bulanan", "Realisasi Finance", "Omset CS", "Budget Iklan", "Total Pengeluaran", "Laba Bersih", "ROFI", "ROI_Pct", "Status Target", "Mushaf Terverifikasi"])
 
-    db['cs_overview'] = pd.DataFrame([
-        {"Rank": 1, "Nama CS": "Nisa",   "Status Okt": "Aktif",     "Target Omset": 1200000000, "Januari": 15839000,  "Februari": 68093999,  "Maret": 196005644, "April": 125603001, "Mei": 74540362, "Juni": 200017711, "Juli": 197594767, "Agustus": 84384400,  "September": 71315000, "Oktober": 121299449, "Total Omset (Jan-Sep)": 1033393884, "Total Closing": 6219, "AOV": 166167, "Pencapaian (%)": "86,1%", "Kontribusi (%)": "39,4%"},
-        {"Rank": 2, "Nama CS": "Salma",  "Status Okt": "Aktif",     "Target Omset": 1200000000, "Januari": 153161444, "Februari": 130171224, "Maret": 201796334, "April": 85285000,  "Mei": 50347999, "Juni": 121468905, "Juli": 79080000,  "Agustus": 104793000, "September": 72695000, "Oktober": 52545008,  "Total Omset (Jan-Sep)": 998798907,  "Total Closing": 5898, "AOV": 169345, "Pencapaian (%)": "83,2%", "Kontribusi (%)": "38,1%"},
-        {"Rank": 3, "Nama CS": "Aulia",  "Status Okt": "Aktif",     "Target Omset": 500000000,  "Januari": 0,         "Februari": 396000,    "Maret": 1894000,   "April": 11719000,  "Mei": 11748999, "Juni": 76174000,  "Juli": 84631886,  "Agustus": 84775000,  "September": 64809000, "Oktober": 13026000,  "Total Omset (Jan-Sep)": 336147885,  "Total Closing": 2128, "AOV": 157964, "Pencapaian (%)": "67,2%", "Kontribusi (%)": "12,8%"},
-        {"Rank": 4, "Nama CS": "Desi",   "Status Okt": "Non-Aktif", "Target Omset": 200000000,  "Januari": 25267000,  "Februari": 26163000,  "Maret": 3342596,   "April": 23010375,  "Mei": 9298900,  "Juni": 4316750,   "Juli": 6395000,   "Agustus": 4917625,   "September": 42651438, "Oktober": 0,         "Total Omset (Jan-Sep)": 145362684,  "Total Closing": 924,  "AOV": 157319, "Pencapaian (%)": "72,7%", "Kontribusi (%)": "5,5%"},
-        {"Rank": 5, "Nama CS": "Syafiq", "Status Okt": "Non-Aktif", "Target Omset": 0,          "Januari": 0,         "Februari": 5619000,   "Maret": 35515478,  "April": 8116000,   "Mei": 8206000,  "Juni": 6050000,   "Juli": 0,         "Agustus": 0,         "September": 0,        "Oktober": 0,         "Total Omset (Jan-Sep)": 63506478,   "Total Closing": 257,  "AOV": 247107, "Pencapaian (%)": "0,0%",  "Kontribusi (%)": "2,4%"},
-        {"Rank": 6, "Nama CS": "Rida",   "Status Okt": "Non-Aktif", "Target Omset": 150000000,  "Januari": 0,         "Februari": 0,         "Maret": 0,         "April": 0,         "Mei": 0,        "Juni": 0,         "Juli": 2495000,   "Agustus": 5128000,   "September": 15148000, "Oktober": 0,         "Total Omset (Jan-Sep)": 22771000,   "Total Closing": 150,  "AOV": 151807, "Pencapaian (%)": "15,2%", "Kontribusi (%)": "0,9%"},
-        {"Rank": 7, "Nama CS": "Olive",  "Status Okt": "Aktif CRM", "Target Omset": 0,          "Januari": 0,         "Februari": 0,         "Maret": 0,         "April": 0,         "Mei": 0,        "Juni": 0,         "Juli": 4324000,   "Agustus": 6720800,   "September": 5990000,  "Oktober": 1296500,   "Total Omset (Jan-Sep)": 17034800,   "Total Closing": 106,  "AOV": 160706, "Pencapaian (%)": "0,0%",  "Kontribusi (%)": "0,6%"},
-        {"Rank": 8, "Nama CS": "Sarah",  "Status Okt": "Non-Aktif", "Target Omset": 100000000,  "Januari": 0,         "Februari": 0,         "Maret": 4820000,   "April": 0,         "Mei": 0,        "Juni": 0,         "Juli": 0,         "Agustus": 0,         "September": 0,        "Oktober": 0,         "Total Omset (Jan-Sep)": 4820000,    "Total Closing": 23,   "AOV": 209565, "Pencapaian (%)": "4,8%",  "Kontribusi (%)": "0,2%"},
-    ])
+    cs_ov_rows = [
+        (1, "Nisa",   "Aktif",     1200000000, 15839000,  68093999,  196005644, 125603001, 74540362, 200017711, 197594767, 84384400,  71315000, 122697449, 1033393884, 6219, 166167, "86,1%", "39,4%"),
+        (2, "Salma",  "Aktif",     1200000000, 153161444, 130171224, 201796334, 85285000,  50347999, 121468905, 79080000,  104793000, 72695000, 56986008,  998798907,  5898, 169345, "83,2%", "38,1%"),
+        (3, "Aulia",  "Aktif",     500000000,  0,         396000,    1894000,   11719000,  11748999, 76174000,  84631886,  84775000,  64809000, 13026000,  336147885,  2128, 157964, "67,2%", "12,8%"),
+        (4, "Desi",   "Non-Aktif", 200000000,  25267000,  26163000,  3342596,   23010375,  9298900,  4316750,   6395000,   4917625,   42651438, 0,         145362684,  924,  157319, "72,7%", "5,5%"),
+        (5, "Syafiq", "Non-Aktif", 0,          0,         5619000,   35515478,  8116000,   8206000,  6050000,   0,         0,         0,        0,         63506478,   257,  247107, "0,0%",  "2,4%"),
+        (6, "Rida",   "Non-Aktif", 150000000,  0,         0,         0,         0,         0,        0,         2495000,   5128000,   15148000, 0,         22771000,   150,  151807, "15,2%", "0,9%"),
+        (7, "Olive",  "Aktif CRM", 0,          0,         0,         0,         0,         0,        0,         4324000,   6720800,   5990000,  1296500,   17034800,   106,  160706, "0,0%",  "0,6%"),
+        (8, "Sarah",  "Non-Aktif", 100000000,  0,         0,         4820000,   0,         0,        0,         0,         0,         0,        0,         4820000,    23,   209565, "4,8%",  "0,2%"),
+    ]
+    db['cs_overview'] = pd.DataFrame(cs_ov_rows, columns=["Rank", "Nama CS", "Status Okt", "Target Omset", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "Total Omset (Jan-Sep)", "Total Closing", "AOV", "Pencapaian (%)", "Kontribusi (%)"])
 
-    db['okt_kpi'] = {"total_donasi": 186870457, "target": 500000000, "capaian_pct": 41.5, "donasi_final": 175574457, "harian_terbaru": 8861008, "verifikasi_pct": 94.0}
-    db['okt_finance_mon'] = {"realisasi_finance": 223894384, "budget_iklan": 188346708, "rofi_real": 1.19, "roas_akuisisi": 0.83, "rofi_cs": 1.19, "hari_cutoff": 22, "avg_donasi_hari": 10177017, "avg_ads_hari": 8561214, "estimasi_akhir_bulan": 315487541}
+    db['okt_kpi'] = {"total_donasi": 192709457, "target": 500000000, "capaian_pct": 42.8, "donasi_final": 175574457, "harian_terbaru": 8861008, "verifikasi_pct": 91.1}
+    db['okt_finance_mon'] = {"realisasi_finance": 238587386, "budget_iklan": 205020588, "rofi_real": 1.16, "roas_akuisisi": 0.79, "rofi_cs": 1.16, "hari_cutoff": 23, "avg_donasi_hari": 10373365, "avg_ads_hari": 8913939, "estimasi_akhir_bulan": 321574303}
     db['okt_cs_table'] = pd.DataFrame([
-        {"CS / CRM": "Salma", "Harian (Total)": 2464008, "Harian (Final)": 2464008, "Mingguan (Total)": 2464008, "Mingguan (Final)": 2464008, "Bulanan (Total)": 52545008,  "Bulanan (Final)": 50828008,  "% Verifikasi": "96,7%", "Total Transaksi": 372,  "Target (Rp)": 200000000, "% Capaian Target": "26,3%", "Sisa Target": 147454992, "Pending Verifikasi": 1717000,  "Target Harian (Sisa)": 4756613},
+        {"CS / CRM": "Salma", "Harian (Total)": 2464008, "Harian (Final)": 2464008, "Mingguan (Total)": 2464008, "Mingguan (Final)": 2464008, "Bulanan (Total)": 56986008,  "Bulanan (Final)": 50828008,  "% Verifikasi": "89,2%", "Total Transaksi": 409,  "Target (Rp)": 200000000, "% Capaian Target": "28,5%", "Sisa Target": 143013992, "Pending Verifikasi": 6158000,  "Target Harian (Sisa)": 4613355},
         {"CS / CRM": "Aulia", "Harian (Total)": 453000,  "Harian (Final)": 453000,  "Mingguan (Total)": 453000,  "Mingguan (Final)": 453000,  "Bulanan (Total)": 13026000,  "Bulanan (Final)": 11418000,  "% Verifikasi": "87,7%", "Total Transaksi": 126,  "Target (Rp)": 50000000,  "% Capaian Target": "26,1%", "Sisa Target": 36974000,  "Pending Verifikasi": 1608000,  "Target Harian (Sisa)": 1192710},
-        {"CS / CRM": "Nisa",  "Harian (Total)": 5944000, "Harian (Final)": 5944000, "Mingguan (Total)": 5944000, "Mingguan (Final)": 5944000, "Bulanan (Total)": 121299449, "Bulanan (Final)": 113328449, "% Verifikasi": "93,4%", "Total Transaksi": 801,  "Target (Rp)": 200000000, "% Capaian Target": "60,6%", "Sisa Target": 78700551,  "Pending Verifikasi": 7971000,  "Target Harian (Sisa)": 2538727},
-        {"CS / CRM": "TOTAL", "Harian (Total)": 8861008, "Harian (Final)": 8861008, "Mingguan (Total)": 8861008, "Mingguan (Final)": 8861008, "Bulanan (Total)": 186870457, "Bulanan (Final)": 175574457, "% Verifikasi": "94,0%", "Total Transaksi": 1299, "Target (Rp)": 450000000, "% Capaian Target": "41,5%", "Sisa Target": 263129543, "Pending Verifikasi": 11296000, "Target Harian (Sisa)": 8488050},
+        {"CS / CRM": "Nisa",  "Harian (Total)": 5944000, "Harian (Final)": 5944000, "Mingguan (Total)": 5944000, "Mingguan (Final)": 5944000, "Bulanan (Total)": 122697449, "Bulanan (Final)": 113328449, "% Verifikasi": "92,4%", "Total Transaksi": 809,  "Target (Rp)": 200000000, "% Capaian Target": "61,3%", "Sisa Target": 77302551,  "Pending Verifikasi": 9369000,  "Target Harian (Sisa)": 2493631},
+        {"CS / CRM": "TOTAL", "Harian (Total)": 8861008, "Harian (Final)": 8861008, "Mingguan (Total)": 8861008, "Mingguan (Final)": 8861008, "Bulanan (Total)": 192709457, "Bulanan (Final)": 175574457, "% Verifikasi": "91,1%", "Total Transaksi": 1344, "Target (Rp)": 450000000, "% Capaian Target": "42,8%", "Sisa Target": 257290543, "Pending Verifikasi": 17135000, "Target Harian (Sisa)": 8299695},
     ])
     db['okt_sumber'] = pd.DataFrame([
-        {"CS / CRM": "Salma", "Leads Meta": 41255008,  "Repeat Order CRM": 0,       "Repeat Order non CRM": 10490000, "Lainnya": 800000,  "Total Nominal": 52545008,  "% Leads Meta": "78,5%"},
+        {"CS / CRM": "Salma", "Leads Meta": 45398008,  "Repeat Order CRM": 0,       "Repeat Order non CRM": 10590000, "Lainnya": 998000,  "Total Nominal": 56986008,  "% Leads Meta": "79,7%"},
         {"CS / CRM": "Aulia", "Leads Meta": 1144000,   "Repeat Order CRM": 7264000, "Repeat Order non CRM": 0,        "Lainnya": 4618000, "Total Nominal": 13026000,  "% Leads Meta": "8,8%"},
-        {"CS / CRM": "Nisa",  "Leads Meta": 113827449, "Repeat Order CRM": 0,       "Repeat Order non CRM": 6181000,  "Lainnya": 1291000, "Total Nominal": 121299449, "% Leads Meta": "93,8%"},
-        {"CS / CRM": "TOTAL", "Leads Meta": 156226457, "Repeat Order CRM": 7264000, "Repeat Order non CRM": 16671000, "Lainnya": 6709000, "Total Nominal": 186870457, "% Leads Meta": "83,6%"},
+        {"CS / CRM": "Nisa",  "Leads Meta": 115225449, "Repeat Order CRM": 0,       "Repeat Order non CRM": 6181000,  "Lainnya": 1291000, "Total Nominal": 122697449, "% Leads Meta": "93,9%"},
+        {"CS / CRM": "TOTAL", "Leads Meta": 161767457, "Repeat Order CRM": 7264000, "Repeat Order non CRM": 16771000, "Lainnya": 6907000, "Total Nominal": 192709457, "% Leads Meta": "83,9%"},
     ])
     db['okt_kanal_rasio'] = pd.DataFrame([
-        {"Kanal / Metrik Donasi": "Total Leads Meta",           "Nominal": "Rp156.226.457", "% Kontribusi / Rasio": "83,6%", "Keterangan & Analisis": "Perolehan donasi dari iklan berbayar Meta Ads"},
-        {"Kanal / Metrik Donasi": "Total CRM (Repeat Order)",   "Nominal": "Rp23.935.000",  "% Kontribusi / Rasio": "12,8%", "Keterangan & Analisis": "Donasi berulang donatur CRM & non-CRM"},
-        {"Kanal / Metrik Donasi": "Total Sedekah Lainnya",      "Nominal": "Rp6.709.000",   "% Kontribusi / Rasio": "3,6%",  "Keterangan & Analisis": "Donasi program umum di luar mushaf / Quran"},
-        {"Kanal / Metrik Donasi": "ROAS Akuisisi (Leads Meta)", "Nominal": "-",             "% Kontribusi / Rasio": "0,83x", "Keterangan & Analisis": "Efektivitas donasi Meta terhadap belanja iklan"},
-        {"Kanal / Metrik Donasi": "ROFI CS Closing (Leads+CRM)","Nominal": "-",             "% Kontribusi / Rasio": "1,19x", "Keterangan & Analisis": "Rasio donasi closing CS terhadap belanja iklan"},
+        {"Kanal / Metrik Donasi": "Total Leads Meta",             "Nominal": "Rp161.767.457", "% Kontribusi / Rasio": "83,9%", "Keterangan & Analisis": "Perolehan donasi dari iklan berbayar Meta Ads"},
+        {"Kanal / Metrik Donasi": "Total CRM (Repeat Order)",     "Nominal": "Rp30.942.000",  "% Kontribusi / Rasio": "12,5%", "Keterangan & Analisis": "Donasi berulang donatur CRM & non-CRM"},
+        {"Kanal / Metrik Donasi": "Total Sedekah Lainnya",        "Nominal": "Rp6.907.000",   "% Kontribusi / Rasio": "3,6%",  "Keterangan & Analisis": "Donasi program umum di luar mushaf / Quran"},
+        {"Kanal / Metrik Donasi": "ROAS Akuisisi (Leads Meta)",   "Nominal": "-",             "% Kontribusi / Rasio": "0,79x", "Keterangan & Analisis": "Efektivitas donasi Meta terhadap belanja iklan"},
+        {"Kanal / Metrik Donasi": "ROFI CS Closing (Leads + CRM)","Nominal": "-",             "% Kontribusi / Rasio": "1,16x", "Keterangan & Analisis": "Rasio donasi closing CS terhadap belanja iklan"},
     ])
 
-    harian_22_rows = [
-        ("2026-10-01", 2464008, 0,       0,      453000,  5744000,  200000,  8208008,  653000,  8861008),
-        ("2026-10-02", 4362000, 629000,  0,      1591000, 8155000,  746000,  12517000, 2966000, 15483000),
-        ("2026-10-03", 1595000, 70000,   0,      657000,  2094000,  198000,  3689000,  925000,  4614000),
-        ("2026-10-04", 2273000, 50000,   0,      283000,  3785000,  0,       6058000,  333000,  6391000),
-        ("2026-10-05", 1375000, 50000,   225000, 1854000, 3738000,  143000,  5338000,  2047000, 7385000),
-        ("2026-10-06", 1766000, 300000,  719000, 555000,  2979000,  607000,  5464000,  1462000, 6926000),
-        ("2026-10-07", 1062000, 50000,   0,      454000,  3013000,  298000,  4075000,  802000,  4877000),
-        ("2026-10-08", 775000,  530000,  0,      653000,  5168000,  797000,  5943000,  1980000, 7923000),
-        ("2026-10-09", 4816000, 1280000, 0,      853000,  8276000,  609000,  13092000, 2742000, 15834000),
-        ("2026-10-10", 2388000, 100000,  100000, 707000,  1819000,  229000,  4307000,  1036000, 5343000),
-        ("2026-10-11", 1346000, 0,       0,      255000,  4288950,  399000,  5634950,  654000,  6288950),
-        ("2026-10-12", 997000,  450000,  0,      154000,  4130000,  400000,  5127000,  1004000, 6131000),
-        ("2026-10-13", 1092000, 150000,  0,      300000,  7004000,  1079000, 8096000,  1529000, 9625000),
-        ("2026-10-14", 3391000, 100000,  0,      299000,  5488000,  110000,  8879000,  509000,  9388000),
-        ("2026-10-15", 1788000, 332000,  100000, 189000,  6341000,  204000,  8229000,  725000,  8954000),
-        ("2026-10-16", 230000,  5201000, 0,      1578000, 10099500, 508000,  10329500, 7287000, 17616500),
-        ("2026-10-17", 200000,  100000,  0,      299000,  4911000,  325000,  5111000,  724000,  5835000),
-        ("2026-10-18", 0,       124000,  0,      149000,  6933000,  104000,  6933000,  377000,  7310000),
-        ("2026-10-19", 400000,  275000,  0,      300000,  7062999,  0,       7462999,  575000,  8037999),
-        ("2026-10-20", 1064000, 1199000, 0,      299000,  7329000,  298000,  8393000,  1796000, 10189000),
-        ("2026-10-21", 5384000, 200000,  0,      0,       4371000,  218000,  9755000,  418000,  10173000),
-        ("2026-10-22", 2487000, 100000,  0,      0,       1098000,  0,       3585000,  100000,  3685000),
+    harian_rows_base = [
+        ("2026-10-01", 2464008, 0, 0, 453000, 5744000, 200000, 8208008, 653000, 8861008),
+        ("2026-10-02", 4362000, 629000, 0, 1591000, 8155000, 746000, 12517000, 2966000, 15483000),
+        ("2026-10-03", 1595000, 70000, 0, 657000, 2094000, 198000, 3689000, 925000, 4614000),
+        ("2026-10-04", 2273000, 50000, 0, 283000, 3785000, 0, 6058000, 333000, 6391000),
+        ("2026-10-05", 1375000, 50000, 225000, 1854000, 3738000, 143000, 5338000, 2047000, 7385000),
+        ("2026-10-06", 1766000, 300000, 719000, 555000, 2979000, 607000, 5464000, 1462000, 6926000),
+        ("2026-10-07", 1062000, 50000, 0, 454000, 3013000, 298000, 4075000, 802000, 4877000),
+        ("2026-10-08", 775000, 530000, 0, 653000, 5168000, 797000, 5943000, 1980000, 7923000),
+        ("2026-10-09", 4816000, 1280000, 0, 853000, 8276000, 609000, 13092000, 2742000, 15834000),
+        ("2026-10-10", 2388000, 100000, 100000, 707000, 1819000, 229000, 4307000, 1036000, 5343000),
+        ("2026-10-11", 1346000, 0, 0, 255000, 4288950, 399000, 5634950, 654000, 6288950),
+        ("2026-10-12", 997000, 450000, 0, 154000, 4130000, 400000, 5127000, 1004000, 6131000),
+        ("2026-10-13", 1092000, 150000, 0, 300000, 7004000, 1079000, 8096000, 1529000, 9625000),
+        ("2026-10-14", 3391000, 100000, 0, 299000, 5488000, 110000, 8879000, 509000, 9388000),
+        ("2026-10-15", 1788000, 332000, 100000, 189000, 6341000, 204000, 8229000, 725000, 8954000),
+        ("2026-10-16", 230000, 5201000, 0, 1578000, 10099500, 508000, 10329500, 7287000, 17616500),
+        ("2026-10-17", 200000, 100000, 0, 299000, 4911000, 325000, 5111000, 724000, 5835000),
+        ("2026-10-18", 0, 124000, 0, 149000, 6933000, 104000, 6933000, 377000, 7310000),
+        ("2026-10-19", 400000, 275000, 0, 300000, 7062999, 0, 7462999, 575000, 8037999),
+        ("2026-10-20", 1064000, 1199000, 0, 299000, 7329000, 298000, 8393000, 1796000, 10189000),
+        ("2026-10-21", 5384000, 200000, 0, 0, 4371000, 218000, 9755000, 418000, 10173000),
+        ("2026-10-22", 2487000, 100000, 0, 0, 1098000, 0, 3585000, 100000, 3685000),
+        ("2026-10-23", 4143000, 298000, 0, 0, 1398000, 0, 5541000, 298000, 5839000),
     ]
     db['okt_harian'] = pd.DataFrame([
         {
             "Tanggal": r[0], "Salma_Meta": r[1], "Salma_CRM": r[2], "Aulia_Meta": r[3], "Aulia_CRM": r[4],
             "Nisa_Meta": r[5], "Nisa_CRM": r[6], "Total_Leads": r[7], "Total_CRM": r[8], "Total_Gabungan": r[9],
             "Salma": r[1] + r[2], "Aulia": r[3] + r[4], "Nisa": r[5] + r[6], "Total Donasi": r[9], "Donasi Final": r[9]
-        } for r in harian_22_rows
+        } for r in harian_rows_base
     ])
 
     db['stok_rincian_baru'] = pd.DataFrame([
@@ -630,16 +591,16 @@ def load_core_realtime_data():
     tasks = {
         "ov":      ("data_cs", "Overview_Semua_CS", True),
         "okt":     ("bulan_oktober", "Dashboard CS", True),
-        "l_nisa":  ("leads_cs", "CS NISA", False),
-        "l_salma": ("leads_cs", "CS SALMA", False),
-        "l_aulia": ("leads_cs", "CS AUL", False),
-        "stok":    ("stok_mushaf", None, True),
+        "l_nisa":  ("leads_cs", "CS NISA", True),
+        "l_salma": ("leads_cs", "CS SALMA", True),
+        "l_aulia": ("leads_cs", "CS AUL", True),
+        "stok":    ("stok_mushaf", None, False),
         "kal":     ("kalender_dist", "Kalender Oktober 2026", True),
         "db_set":  ("master_db", "SETTING DASHBOARD", True),
     }
     fetched = {}
     with ThreadPoolExecutor(max_workers=8) as ex:
-        fut_map = {ex.submit(fetch_fast_grid, k_nm, sh_nm, u_gid): tag for tag, (k_nm, sh_nm, u_gid) in tasks.items()}
+        fut_map = {ex.submit(fetch_fast_grid, k_nm, sh_nm, p_sh): tag for tag, (k_nm, sh_nm, p_sh) in tasks.items()}
         for fut in as_completed(fut_map):
             tag = fut_map[fut]
             try: fetched[tag] = fut.result()
@@ -662,7 +623,8 @@ def load_core_realtime_data():
 
     g_okt = fetched.get("okt", pd.DataFrame())
     if not g_okt.empty:
-        mon_fin = parse_monitoring_roas_finance(g_okt)
+        mon_fin, df_kan_live = parse_monitoring_roas_finance(g_okt)
+        if not df_kan_live.empty: db['okt_kanal_rasio'] = df_kan_live
         if mon_fin.get("realisasi_finance", 0) > 0:
             db['okt_finance_mon'].update(mon_fin)
             db['macro_monthly'].loc[db['macro_monthly']['Bulan'] == 'Oktober', 'Realisasi Finance'] = mon_fin["realisasi_finance"]
@@ -694,21 +656,21 @@ def load_core_realtime_data():
             db['okt_sumber'] = t_src_okt
             non_tot_s = t_src_okt[t_src_okt['CS / CRM'].astype(str).str.upper() != 'TOTAL']
             tot_meta_okt = float(non_tot_s['Leads Meta'].sum())
-            ads_now = float(db['okt_finance_mon'].get('budget_iklan', 188346708))
-            if tot_meta_okt > 0 and ads_now > 0:
+            ads_now = float(db['okt_finance_mon'].get('budget_iklan', 205020588))
+            if tot_meta_okt > 0 and ads_now > 0 and "roas_akuisisi" not in mon_fin:
                 db['okt_finance_mon']['roas_akuisisi'] = round(tot_meta_okt / ads_now, 2)
 
         t_har_2row = parse_rekap_harian_cs_2row(g_okt)
         if not t_har_2row.empty:
             db['okt_harian'] = t_har_2row
             sync_status["Dashboard CS Oktober"] = f"Live ({len(t_har_2row[t_har_2row['Total_Gabungan'] > 0])} hari aktif)"
-        else: sync_status["Dashboard CS Oktober"] = "Live Connected"
-    else: sync_status["Dashboard CS Oktober"] = "Baseline 22 Okt"
+        else: sync_status["Dashboard CS Oktober"] = "Live Synced"
+    else: sync_status["Dashboard CS Oktober"] = "Baseline 23 Okt"
 
     df_m = db['macro_monthly']
     df_m['Laba Bersih'] = df_m['Realisasi Finance'] - df_m['Total Pengeluaran']
     df_m['ROFI'] = np.where(df_m['Budget Iklan'] > 0, (df_m['Realisasi Finance'] / df_m['Budget Iklan']).round(2), 0.0)
-    df_m['ROAS_Est'] = np.where(df_m['Bulan'] == 'Oktober', db['okt_finance_mon'].get('roas_akuisisi', 0.83), (df_m['ROFI'] * 0.72).round(2))
+    df_m['ROAS_Est'] = np.where(df_m['Bulan'] == 'Oktober', db['okt_finance_mon'].get('roas_akuisisi', 0.79), (df_m['ROFI'] * 0.72).round(2))
     df_m['Selisih Target'] = df_m['Realisasi Finance'] - df_m['Target Bulanan']
     df_m['Selisih Finance vs CS'] = df_m['Realisasi Finance'] - df_m['Omset CS']
     df_m['% Capaian'] = np.where(df_m['Target Bulanan'] > 0, (df_m['Realisasi Finance'] / df_m['Target Bulanan'] * 100).round(1), 0.0)
@@ -793,12 +755,9 @@ def load_core_realtime_data():
     else:
         sync_status["Stok Mushaf Real-Time"] = "Baseline Baru (702 Defisit)"
 
-    # Pastikan 100% kolom numerik pada stok_rincian_baru aman sebelum dipakai di chart
     for cn in ["Siap Salur (Stiker)", "Belum Siap (Proses)", "Total Stok Fisik"]:
-        if cn not in db['stok_rincian_baru'].columns:
-            db['stok_rincian_baru'][cn] = 0
-        else:
-            db['stok_rincian_baru'][cn] = db['stok_rincian_baru'][cn].apply(lambda x: int(num_clean(x)))
+        if cn not in db['stok_rincian_baru'].columns: db['stok_rincian_baru'][cn] = 0
+        else: db['stok_rincian_baru'][cn] = db['stok_rincian_baru'][cn].apply(lambda x: int(num_clean(x)))
 
     db['kalender_okt'] = pd.DataFrame([
         {"No": 1, "Tanggal Agenda": "2026-10-20", "ID Proyek": "AQ-2026-087", "Nama Lembaga Penerima": "MDU AL-ITTIHAD CIHERANG CIPELAH",    "Nama PIC": "Abdul Karim",             "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Rancabali, Kab. Bandung",          "Jumlah Mushaf (Pcs)": 108, "Variasi Mushaf": "Super Tajwid",    "Status": "Scheduled"},
@@ -826,7 +785,6 @@ def load_core_realtime_data():
     if "Kalender Distribusi" not in sync_status:
         sync_status["Kalender Distribusi"] = "Live (9 titik)"
 
-    # Sinkronisasi Real-Time untuk SETTING DASHBOARD (Master Database CRM)
     g_db_set = fetched.get("db_set", pd.DataFrame())
     if not g_db_set.empty:
         parsed_db_s = parse_setting_dashboard_crm(g_db_set)
@@ -883,9 +841,8 @@ def load_core_realtime_data():
     db['last_sync'] = now_wib().strftime("%d %b %Y • %H:%M:%S WIB")
     return db
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_lazy_contacts_db():
-    """Menarik sheet DATABASE dengan pemindai baris header otomatis & cache-buster agar 100% real-time."""
+@st.cache_data(ttl=120, show_spinner=False)
+def load_lazy_contacts_db(sync_token: int):
     sid, _ = SHEETS_CONFIG["master_db"]
     cb = int(time.time() * 1000)
     urls = [
@@ -894,14 +851,13 @@ def load_lazy_contacts_db():
     ]
     for u_db in urls:
         try:
-            df_raw = pd.read_csv(u_db, header=None, dtype=str).fillna("")
+            df_raw = read_csv_nocache(u_db)
             if not df_raw.empty and df_raw.shape[1] >= 4:
                 hdr_idx = 0
                 for r_i in range(min(15, len(df_raw))):
                     row_txt = " ".join(str(x).lower() for x in df_raw.iloc[r_i].values)
                     if "nama" in row_txt and ("whatsapp" in row_txt or "hp" in row_txt or "program" in row_txt or "kategori" in row_txt):
-                        hdr_idx = r_i
-                        break
+                        hdr_idx = r_i; break
                 headers = [str(x).strip() if str(x).strip() else f"Col_{i}" for i, x in enumerate(df_raw.iloc[hdr_idx].values)]
                 df_c = df_raw.iloc[hdr_idx+1:].copy()
                 df_c.columns = headers
@@ -932,8 +888,7 @@ def load_lazy_contacts_db():
                 df_c = df_c[(df_c["Nama Donatur"] != "") & (df_c["Nama Donatur"] != "-") & (~df_c["Nama Donatur"].str.lower().str.contains("nama donatur"))]
                 if len(df_c) >= 5:
                     return df_c.reset_index(drop=True), False
-        except:
-            continue
+        except: continue
     sample = pd.DataFrame([
         {"Nama Donatur": "Donatur Prioritas A1", "Nomor Whatsapp": "628000000001", "PiC": "CS Nisa",  "Program": "Waqaf/Mushaf", "Donasi Terakhir": "1 Oktober 2026",   "Kategori": "Donatur Rutin", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Sudah", "Prioritas": "A1",      "Reminder": "AMAN"},
         {"Nama Donatur": "Donatur Aktif B1",     "Nomor Whatsapp": "628000000002", "PiC": "CS Salma", "Program": "AmalQu",       "Donasi Terakhir": "2 Oktober 2026",   "Kategori": "Donatur Aktif", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "B1",      "Reminder": "PANTAU"},
@@ -942,37 +897,39 @@ def load_lazy_contacts_db():
     ])
     return sample, True
 
-db = load_core_realtime_data()
+# Token otomatis berganti tiap 60 detik atau langsung berganti saat tombol Sync diklik
+current_sync_token = int(time.time() // 60) + (st.session_state.sync_nonce * 100000)
+db = load_core_realtime_data(current_sync_token)
 df_macro = db['macro_monthly']
 sa = db['stok_audit']
 
 # ==============================================================================
-# 8. SIDEBAR NAVIGASI & STATUS DIAGNOSTIK SERVER (WAKTU WIB AKURAT)
+# 7. SIDEBAR NAVIGASI & TOMBOL INSTANT FORCE-SYNC
 # ==============================================================================
 with st.sidebar:
     render_html(f"""
-    <div style="display:flex; align-items:center; gap:12px; padding:4px 4px 18px 4px; border-bottom:1px solid var(--border-soft); margin-bottom:14px;">
+    <div style="display:flex;align-items:center;gap:12px;padding:4px 4px 18px 4px;border-bottom:1px solid var(--border-soft);margin-bottom:14px;">
         {build_logo_html(44)}
         <div>
-            <div class="brand-title" style="font-family:'Outfit',sans-serif !important; font-weight:800; font-size:21px; line-height:1.15;">AmalQu</div>
-            <div class="brand-sub" style="font-size:11px; font-weight:600; line-height:1.3; margin-top:2px;">Yayasan AmalQu Indonesia Peduli</div>
+            <div class="brand-title" style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:21px;line-height:1.15;">AmalQu</div>
+            <div class="brand-sub" style="font-size:11px;font-weight:600;line-height:1.3;margin-top:2px;">Yayasan AmalQu Indonesia Peduli</div>
         </div>
     </div>
-    <div style="font-size:11px; font-weight:700; color:var(--text-muted) !important; letter-spacing:0.8px; text-transform:uppercase; padding:4px 6px 8px 6px;">
+    <div style="font-size:11px;font-weight:700;color:var(--text-muted)!important;letter-spacing:0.8px;text-transform:uppercase;padding:4px 6px 8px 6px;">
         MENU DIVISI ({user_role.upper()})
     </div>
     """)
     menu_pilihan = st.radio("Navigasi Utama", allowed_menus, label_visibility="collapsed")
     render_html(f"""
-    <div class="sub-box" style="margin-top:20px; padding:13px 14px; border-radius:14px;">
-        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-            <i class="ri-shield-user-line" style="color:#6366F1 !important; font-size:16px;"></i>
-            <span style="font-size:12.5px; font-weight:700;">{current_user['username_display']} ({user_role})</span>
+    <div class="sub-box" style="margin-top:20px;padding:13px 14px;border-radius:14px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+            <i class="ri-shield-user-line" style="color:#6366F1!important;font-size:16px;"></i>
+            <span style="font-size:12.5px;font-weight:700;">{current_user['username_display']} ({user_role})</span>
         </div>
-        <div style="font-size:11px; color:var(--text-secondary) !important; line-height:1.45;">
+        <div style="font-size:11px;color:var(--text-secondary)!important;line-height:1.45;">
             {current_user['title']}<br>
-            <span style="color:#10B981 !important; font-weight:700;">● Fast Parallel Sync Aktif</span><br>
-            <span style="font-size:10.5px; color:var(--text-muted) !important;">WIB: {db['last_sync']}</span>
+            <span style="color:#10B981!important;font-weight:700;">● No-Cache Auto-Sync (60s)</span><br>
+            <span style="font-size:10.5px;color:var(--text-muted)!important;">WIB: {db['last_sync']}</span>
         </div>
     </div>
     """)
@@ -982,6 +939,7 @@ with st.sidebar:
     sb_col1, sb_col2 = st.columns(2)
     with sb_col1:
         if st.button("🔄 Sync Data", use_container_width=True):
+            st.session_state.sync_nonce += 1
             st.cache_data.clear()
             st.rerun()
     with sb_col2:
@@ -992,7 +950,7 @@ with st.sidebar:
             st.rerun()
 
 # ==============================================================================
-# 9. UI HELPER COMPONENTS
+# 8. UI HELPER COMPONENTS
 # ==============================================================================
 def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_theme="green", subtext=""):
     ib_map = {"indigo": "ib-indigo", "orange": "ib-orange", "emerald": "ib-emerald", "rose": "ib-rose"}
@@ -1000,14 +958,14 @@ def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_them
     arrow_ic = "ri-arrow-right-up-line" if badge_theme in ["green", "indigo"] else ("ri-alert-line" if badge_theme == "red" else "ri-information-line")
     render_html(f"""
     <div class="bento-card kpi-uniform">
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-            <span style="font-size:12.5px; font-weight:600; color:var(--text-secondary) !important; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{title}</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <span style="font-size:12.5px;font-weight:600;color:var(--text-secondary)!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{title}</span>
             <div class="icon-box {ib_map.get(color_theme, 'ib-indigo')}"><i class="{icon_cls}"></i></div>
         </div>
-        <div class="metric-num" style="font-size:24px; font-weight:800; letter-spacing:-0.5px; white-space:nowrap;">{value}</div>
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:nowrap;">
+        <div class="metric-num" style="font-size:24px;font-weight:800;letter-spacing:-0.5px;white-space:nowrap;">{value}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:nowrap;">
             <span class="badge-pill {bp_map.get(badge_theme, 'bp-green')}"><i class="{arrow_ic}"></i> {badge_text}</span>
-            <span style="font-size:11px; color:var(--text-muted) !important; font-weight:600; white-space:nowrap;">{subtext}</span>
+            <span style="font-size:11px;color:var(--text-muted)!important;font-weight:600;white-space:nowrap;">{subtext}</span>
         </div>
     </div>
     """)
@@ -1015,8 +973,8 @@ def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_them
 def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme="indigo"):
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
     badge_html = f'<span class="badge-pill {bp_map.get(badge_theme, "bp-indigo")}">{badge_text}</span>' if badge_text else ""
-    sub_html = f'<div style="font-size:11.5px; color:var(--text-muted) !important; margin-top:2px;">{subtitle_text}</div>' if subtitle_text else ""
-    render_html(f'<div class="chart-header-box"><div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;"><div style="min-width:0;"><div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; color:var(--text-primary) !important;">{title_text}</div>{sub_html}</div>{badge_html}</div></div>')
+    sub_html = f'<div style="font-size:11.5px;color:var(--text-muted)!important;margin-top:2px;">{subtitle_text}</div>' if subtitle_text else ""
+    render_html(f'<div class="chart-header-box"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;"><div style="min-width:0;"><div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;color:var(--text-primary)!important;">{title_text}</div>{sub_html}</div>{badge_html}</div></div>')
 
 def apply_saas_plotly(fig, height=320, is_currency=False):
     bg_col = "#111827" if is_dark else "#FFFFFF"
@@ -1042,7 +1000,7 @@ def make_gauge_chart(value, max_val=100, suffix="%", bar_color="#10B981"):
 
 def render_saas_table(df: pd.DataFrame, max_rows=60):
     if df is None or df.empty:
-        render_html('<div class="bento-card"><p style="color:var(--text-muted) !important; margin:0;">Data tidak ditemukan untuk filter ini.</p></div>')
+        render_html('<div class="bento-card"><p style="color:var(--text-muted)!important;margin:0;">Data tidak ditemukan untuk filter ini.</p></div>')
         return
     df_show = df.head(max_rows).copy()
     ths = "".join([f"<th>{str(c)}</th>" for c in df_show.columns])
@@ -1062,8 +1020,7 @@ def render_saas_table(df: pd.DataFrame, max_rows=60):
                 cell_html = f'<span class="badge-pill bp-orange"><i class="ri-time-fill"></i> {val_str}</span>'
             elif col_name in ["Nama CS", "CS / CRM", "Bulan", "Nama Lembaga Penerima", "Nama Donatur", "Jenis Produk", "Produk & Kategori", "Periode / Komponen Analisis"]:
                 cell_html = f'<span style="font-weight:700;">{val_str}</span>'
-            else:
-                cell_html = val_str
+            else: cell_html = val_str
             tds += f"<td>{cell_html}</td>"
         trs += f"<tr{tr_cls}>{tds}</tr>"
     render_html(f'<div class="saas-table-wrap"><table class="saas-table"><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table></div>')
@@ -1085,7 +1042,7 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
             f"<td>{rp_dash(r['Nisa_Meta'])}</td><td>{rp_dash(r['Nisa_CRM'])}</td>"
             f"<td style='font-weight:600;'>{rp_dash(r['Total_Leads'])}</td>"
             f"<td style='font-weight:600;'>{rp_dash(r['Total_CRM'])}</td>"
-            f"<td style='font-weight:700; color:#10B981 !important;'>{rp_dash(r['Total_Gabungan'])}</td>"
+            f"<td style='font-weight:700;color:#10B981!important;'>{rp_dash(r['Total_Gabungan'])}</td>"
             f"<td style='text-align:center;'>{cr_txt}</td></tr>"
         )
     rows_html += (
@@ -1096,11 +1053,11 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
         f"<td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td>"
         f"<td>{rp_dash(sum_gab)}</td><td style='text-align:center;'>Rata-rata CR</td></tr>"
         f"<tr class='row-grand'><td>TOTAL KESELURUHAN</td>"
-        f"<td colspan='2' style='text-align:center; color:#10B981 !important;'>Salma: {rp_dash(sum_s_m + sum_s_c)}</td>"
-        f"<td colspan='2' style='text-align:center; color:#10B981 !important;'>Aulia: {rp_dash(sum_a_m + sum_a_c)}</td>"
-        f"<td colspan='2' style='text-align:center; color:#10B981 !important;'>Nisa: {rp_dash(sum_n_m + sum_n_c)}</td>"
+        f"<td colspan='2' style='text-align:center;color:#10B981!important;'>Salma: {rp_dash(sum_s_m + sum_s_c)}</td>"
+        f"<td colspan='2' style='text-align:center;color:#10B981!important;'>Aulia: {rp_dash(sum_a_m + sum_a_c)}</td>"
+        f"<td colspan='2' style='text-align:center;color:#10B981!important;'>Nisa: {rp_dash(sum_n_m + sum_n_c)}</td>"
         f"<td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td>"
-        f"<td style='color:#6366F1 !important;'>{rp_dash(sum_gab)}</td>"
+        f"<td style='color:#6366F1!important;'>{rp_dash(sum_gab)}</td>"
         f"<td style='text-align:center;'><span class='badge-pill bp-indigo'>{avg_cr_val:.1f}%</span></td></tr>"
     )
     render_html(f"""
@@ -1109,13 +1066,13 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
             <thead>
                 <tr>
                     <th rowspan="2" style="vertical-align:middle;">Tanggal</th>
-                    <th colspan="2" style="text-align:center; border-bottom:1px solid var(--border-strong);">Salma</th>
-                    <th colspan="2" style="text-align:center; border-bottom:1px solid var(--border-strong);">Aulia</th>
-                    <th colspan="2" style="text-align:center; border-bottom:1px solid var(--border-strong);">Nisa</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Salma</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Aulia</th>
+                    <th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Nisa</th>
                     <th rowspan="2" style="vertical-align:middle;">Total Leads</th>
                     <th rowspan="2" style="vertical-align:middle;">Total CRM</th>
                     <th rowspan="2" style="vertical-align:middle;">Total Gabungan</th>
-                    <th rowspan="2" style="vertical-align:middle; text-align:center;">CR Harian (%)</th>
+                    <th rowspan="2" style="vertical-align:middle;text-align:center;">CR Harian (%)</th>
                 </tr>
                 <tr><th>Leads Meta</th><th>CRM</th><th>Leads Meta</th><th>CRM</th><th>Leads Meta</th><th>CRM</th></tr>
             </thead>
@@ -1125,23 +1082,23 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
     """)
 
 # ==============================================================================
-# 10. TOP HEADER BAR
+# 9. TOP HEADER BAR
 # ==============================================================================
 hdr_col_left, hdr_col_right = st.columns([7.5, 1.1])
 with hdr_col_left:
     render_html(f"""
-    <div class="bento-card" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:12px 18px !important; margin-bottom:14px !important;">
-        <div style="display:flex; align-items:center; gap:12px;">
+    <div class="bento-card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 18px!important;margin-bottom:14px!important;">
+        <div style="display:flex;align-items:center;gap:12px;">
             {build_logo_html(40)}
             <div>
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <span style="font-family:'Outfit',sans-serif !important; font-size:20px; font-weight:800;">AmalQu</span>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span style="font-family:'Outfit',sans-serif!important;font-size:20px;font-weight:800;">AmalQu</span>
                     <span class="badge-pill bp-orange">{menu_pilihan}</span>
                 </div>
-                <div style="font-size:12px; font-weight:600; color:var(--text-secondary) !important;">Yayasan AmalQu Indonesia Peduli • Enterprise Command Center</div>
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;">Yayasan AmalQu Indonesia Peduli • Enterprise Command Center</div>
             </div>
         </div>
-        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span class="badge-pill bp-indigo"><i class="ri-user-star-line"></i> {current_user['username_display']} ({user_role})</span>
             <span class="badge-pill bp-green"><i class="ri-flashlight-fill" style="font-size:11px;"></i> {db['last_sync']}</span>
         </div>
@@ -1165,12 +1122,12 @@ if menu_pilihan == "Dashboard Overview":
     selisih_real_cs_okt = real_okt - cs_okt_total
     target_okt = float(okt_r['Target Bulanan'])
     ads_okt = float(fm.get('budget_iklan', okt_r['Budget Iklan']))
-    hari_cutoff = int(fm.get('hari_cutoff', 22))
+    hari_cutoff = int(fm.get('hari_cutoff', 23))
     laju_harian_real = float(fm.get('avg_donasi_hari', real_okt / max(1, hari_cutoff)))
     proyeksi_akhir_bulan_real = float(fm.get('estimasi_akhir_bulan', laju_harian_real * 31))
 
     non_tot_s = db['okt_sumber'][db['okt_sumber']['CS / CRM'].astype(str).str.upper() != 'TOTAL']
-    leads_meta_okt = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 156226457.0
+    leads_meta_okt = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 161767457.0
     satpam_okt = hitung_satpam_keuangan(target_okt, real_okt, ads_okt, okt_r['Mushaf Terverifikasi'], leads_meta_val=leads_meta_okt)
     roas_okt_val = float(fm.get('roas_akuisisi', satpam_okt['roas_meta']))
     rofi_okt_val = float(fm.get('rofi_real', satpam_okt['rofi_aktual']))
@@ -1183,14 +1140,14 @@ if menu_pilihan == "Dashboard Overview":
     with c4:
         render_html(f"""
         <div class="hero-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-size:11px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase;">SATPAM KEUANGAN (ROAS & ROFI)</span>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">SATPAM KEUANGAN (ROAS & ROFI)</span>
                 <i class="ri-shield-star-line" style="font-size:18px;"></i>
             </div>
-            <div class="metric-num" style="font-size:21.5px; font-weight:800; white-space:nowrap; letter-spacing:-0.4px;">
-                ROAS {roas_okt_val:.2f}x <span style="opacity:0.65; font-weight:500;">|</span> ROFI {rofi_okt_val:.2f}x
+            <div class="metric-num" style="font-size:21.5px;font-weight:800;white-space:nowrap;letter-spacing:-0.4px;">
+                ROAS {roas_okt_val:.2f}x <span style="opacity:0.65;font-weight:500;">|</span> ROFI {rofi_okt_val:.2f}x
             </div>
-            <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.16); padding:6px 10px; border-radius:10px; font-size:11px; font-weight:600; gap:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.16);padding:6px 10px;border-radius:10px;font-size:11px;font-weight:600;gap:8px;">
                 <span class="nowrap-val">Ads: {rp_short(ads_okt)}</span>
                 <span class="nowrap-val">DSD: {rp_short(satpam_okt['dsd'])}</span>
             </div>
@@ -1211,70 +1168,44 @@ if menu_pilihan == "Dashboard Overview":
 
     with m_right:
         if user_role == "Advertiser":
-            bottom_box_html = f"""
-            <div class="sub-box" style="border-radius:12px; padding:11px 14px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                    <span style="font-size:12px; font-weight:700;"><i class="ri-advertisement-line" style="color:#10B981 !important;"></i> Rasio ROAS & ROFI (Okt)</span>
-                    <span class="badge-pill bp-green">Avg CR {db['avg_cr_okt']:.1f}%</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
-                    <span style="color:var(--text-secondary) !important;">Leads Meta (83,6%)</span><span class="nowrap-val" style="color:#10B981 !important;">{rp(leads_meta_okt)}</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px;">
-                    <span style="color:var(--text-secondary) !important;">ROAS Meta / ROFI Real</span><span class="nowrap-val">{roas_okt_val:.2f}x / {rofi_okt_val:.2f}x</span>
-                </div>
-            </div>
-            """
+            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12px;font-weight:700;"><i class="ri-advertisement-line" style="color:#10B981!important;"></i> Rasio ROAS & ROFI (Okt)</span><span class="badge-pill bp-green">Avg CR {db["avg_cr_okt"]:.1f}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Leads Meta (83,9%)</span><span class="nowrap-val" style="color:#10B981!important;">{rp(leads_meta_okt)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">ROAS Meta / ROFI Real</span><span class="nowrap-val">{roas_okt_val:.2f}x / {rofi_okt_val:.2f}x</span></div></div>'
         else:
-            bottom_box_html = f"""
-            <div class="sub-box" style="border-radius:12px; padding:11px 14px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                    <span style="font-size:12px; font-weight:700;"><i class="ri-alarm-warning-line" style="color:#EF4444 !important;"></i> Status Inventaris & Defisit (Agust–Okt)</span>
-                    <span class="badge-pill bp-red">Wajib Beli {sa['defisit_agust_okt']} Mushaf</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
-                    <span style="color:var(--text-secondary) !important;">Kebutuhan 3 Bln vs Stok Mushaf</span><span class="nowrap-val">{sa['kebutuhan_agust_okt']:,} vs {sa['stok_fisik_mushaf_tersedia']:,} Pcs</span>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:12px;">
-                    <span style="color:var(--text-secondary) !important;">Total Inventaris Fisik (Semua)</span><span class="nowrap-val" style="color:#10B981 !important;">{sa['total_inventaris_fisik']:,} Pcs (Siap: {sa['total_inventaris_siap']:,})</span>
-                </div>
-            </div>
-            """
+            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12px;font-weight:700;"><i class="ri-alarm-warning-line" style="color:#EF4444!important;"></i> Status Inventaris & Defisit (Agust–Okt)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Mushaf</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Kebutuhan 3 Bln vs Stok Mushaf</span><span class="nowrap-val">{sa["kebutuhan_agust_okt"]:,} vs {sa["stok_fisik_mushaf_tersedia"]:,} Pcs</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">Total Inventaris Fisik (Semua)</span><span class="nowrap-val" style="color:#10B981!important;">{sa["total_inventaris_fisik"]:,} Pcs (Siap: {sa["total_inventaris_siap"]:,})</span></div></div>'
 
         render_html(f"""
-        <div class="bento-card" style="min-height:392px; display:flex; flex-direction:column; justify-content:space-between;">
+        <div class="bento-card" style="min-height:392px;display:flex;flex-direction:column;justify-content:space-between;">
             <div>
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px;">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <div class="icon-box ib-indigo" style="width:32px; height:32px; font-size:15px;"><i class="ri-scales-3-line"></i></div>
-                        <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15px;">Monitoring ROAS, ROFI & Proyeksi</span>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div class="icon-box ib-indigo" style="width:32px;height:32px;font-size:15px;"><i class="ri-scales-3-line"></i></div>
+                        <span style="font-family:'Outfit',sans-serif!important;font-weight:700;font-size:15px;">Monitoring ROAS, ROFI & Proyeksi</span>
                     </div>
                     <span class="badge-pill bp-indigo">CUT-OFF {hari_cutoff} HARI</span>
                 </div>
-                <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:10px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:5px;">
-                        <span style="color:var(--text-secondary) !important;">1. Realisasi Donasi Finance</span><span class="nowrap-val" style="color:#6366F1 !important;">{rp(real_okt)}</span>
+                <div class="sub-box" style="border-radius:12px;padding:11px 14px;margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:5px;">
+                        <span style="color:var(--text-secondary)!important;">1. Realisasi Donasi Finance</span><span class="nowrap-val" style="color:#6366F1!important;">{rp(real_okt)}</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:5px;">
-                        <span style="color:var(--text-secondary) !important;">2. Total Input Dashboard CS</span><span class="nowrap-val" style="color:#10B981 !important;">{rp(cs_okt_total)}</span>
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:5px;">
+                        <span style="color:var(--text-secondary)!important;">2. Total Input Dashboard CS</span><span class="nowrap-val" style="color:#10B981!important;">{rp(cs_okt_total)}</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; border-top:1px dashed var(--border-soft); padding-top:5px;">
-                        <span style="color:var(--text-secondary) !important;">ROAS Akuisisi Meta / ROFI Real</span><span class="nowrap-val" style="color:#F97316 !important;">ROAS {roas_okt_val:.2f}x • ROFI {rofi_okt_val:.2f}x</span>
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;border-top:1px dashed var(--border-soft);padding-top:5px;">
+                        <span style="color:var(--text-secondary)!important;">ROAS Akuisisi Meta / ROFI Real</span><span class="nowrap-val" style="color:#F97316!important;">ROAS {roas_okt_val:.2f}x • ROFI {rofi_okt_val:.2f}x</span>
                     </div>
                 </div>
-                <div class="sub-box" style="border-radius:12px; padding:11px 14px; margin-bottom:10px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                        <span style="font-size:12px; font-weight:700;"><i class="ri-compass-3-line" style="color:#F59E0B !important;"></i> Proyeksi Akhir Bulan (31 Okt)</span>
+                <div class="sub-box" style="border-radius:12px;padding:11px 14px;margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                        <span style="font-size:12px;font-weight:700;"><i class="ri-compass-3-line" style="color:#F59E0B!important;"></i> Proyeksi Akhir Bulan (31 Okt)</span>
                         <span class="badge-pill bp-orange">{(proyeksi_akhir_bulan_real/target_okt)*100:.1f}% Target</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
-                        <span style="color:var(--text-secondary) !important;">Rata-Rata Donasi / Hari</span><span class="nowrap-val">{rp(laju_harian_real)}</span>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                        <span style="color:var(--text-secondary)!important;">Rata-Rata Donasi / Hari</span><span class="nowrap-val">{rp(laju_harian_real)}</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
-                        <span style="color:var(--text-secondary) !important;">Rata-Rata Ad Spend / Hari</span><span class="nowrap-val">{rp(fm.get('avg_ads_hari', ads_okt/max(1,hari_cutoff)))}</span>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                        <span style="color:var(--text-secondary)!important;">Rata-Rata Ad Spend / Hari</span><span class="nowrap-val">{rp(fm.get('avg_ads_hari', ads_okt/max(1,hari_cutoff)))}</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; font-size:12px;">
-                        <span style="color:var(--text-secondary) !important;">Estimasi Donasi Akhir Bulan</span><span class="nowrap-val" style="color:#10B981 !important;">{rp(proyeksi_akhir_bulan_real)}</span>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;">
+                        <span style="color:var(--text-secondary)!important;">Estimasi Donasi Akhir Bulan</span><span class="nowrap-val" style="color:#10B981!important;">{rp(proyeksi_akhir_bulan_real)}</span>
                     </div>
                 </div>
             </div>
@@ -1284,19 +1215,13 @@ if menu_pilihan == "Dashboard Overview":
 
     b1, b2, b3 = st.columns(3)
     if user_role == "Advertiser":
-        with b1:
-            render_html('<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">Perolehan CS Aktif (Oktober)</span><span class="badge-pill bp-indigo">1.299 Transaksi</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">Rp 186,87 Juta</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:65%; background:#FF6B4A; border-radius:99px;"></div><div style="width:28%; background:#4F46E5; border-radius:99px;"></div><div style="width:7%; background:#10B981; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>Nisa: <b>Rp 121,3 Jt</b></span><span>Salma: <b>Rp 52,5 Jt</b></span><span>Aulia: <b>Rp 13,0 Jt</b></span></div></div>')
-        with b2:
-            render_html('<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">Sumber Kontak Donasi (Oktober)</span><span class="badge-pill bp-green">83,6% Meta Ads</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">Rp 156,23 Jt Leads Meta</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:84%; background:#10B981; border-radius:99px;"></div><div style="width:13%; background:#4F46E5; border-radius:99px;"></div><div style="width:3%; background:#F59E0B; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>Meta: <b>83,6%</b></span><span>CRM Total: <b>Rp 23,9 Jt (12,8%)</b></span><span>Lainnya: <b>3,6%</b></span></div></div>')
-        with b3:
-            render_html(f'<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">ROAS vs ROFI Belanja Iklan (Okt)</span><span class="badge-pill bp-orange">ROAS {roas_okt_val:.2f}x | ROFI {rofi_okt_val:.2f}x</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">{rp_short(ads_okt)} Ad Spend</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:70%; background:#4F46E5; border-radius:99px;"></div><div style="width:30%; background:#10B981; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>ROAS Akuisisi Meta: <b>{roas_okt_val:.2f}x</b></span><span>ROFI Real/CS: <b>{rofi_okt_val:.2f}x</b></span></div></div>')
+        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Perolehan CS Aktif (Oktober)</span><span class="badge-pill bp-indigo">1.344 Transaksi</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(cs_okt_total)}</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:64%;background:#FF6B4A;border-radius:99px;"></div><div style="width:29%;background:#4F46E5;border-radius:99px;"></div><div style="width:7%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Nisa: <b>Rp 122,7 Jt</b></span><span>Salma: <b>Rp 57,0 Jt</b></span><span>Aulia: <b>Rp 13,0 Jt</b></span></div></div>')
+        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Sumber Kontak Donasi (Oktober)</span><span class="badge-pill bp-green">83,9% Meta Ads</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(leads_meta_okt)} Leads Meta</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:84%;background:#10B981;border-radius:99px;"></div><div style="width:13%;background:#4F46E5;border-radius:99px;"></div><div style="width:3%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Meta: <b>83,9%</b></span><span>CRM Total: <b>Rp 30,9 Jt (12,5%)</b></span><span>Lainnya: <b>3,6%</b></span></div></div>')
+        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">ROAS vs ROFI Belanja Iklan (Okt)</span><span class="badge-pill bp-orange">ROAS {roas_okt_val:.2f}x | ROFI {rofi_okt_val:.2f}x</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(ads_okt)} Ad Spend</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:70%;background:#4F46E5;border-radius:99px;"></div><div style="width:30%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>ROAS Akuisisi Meta: <b>{roas_okt_val:.2f}x</b></span><span>ROFI Real/CS: <b>{rofi_okt_val:.2f}x</b></span></div></div>')
     else:
-        with b1:
-            render_html(f'<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">Total Mushaf Meta LP & TikTok</span><span class="badge-pill bp-indigo">3.447 Pcs Fisik</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">{sa["st_siap"]} ST • {sa["mushaf_siap_akumulasi"]} AW Siap</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:32%; background:#10B981; border-radius:99px;"></div><div style="width:68%; background:#F97316; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>Meta LP: <b>{sa["meta_lp_total"]:,}</b></span><span>TikTok: <b>{sa["tiktok_mushaf_total"]}</b></span><span>Proses/PO: <b>2.328</b></span></div></div>')
-        with b2:
-            render_html(f'<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">Defisit Mushaf (Agustus – Oktober)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Pcs</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">Kebutuhan {sa["kebutuhan_agust_okt"]:,} Pcs</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:83%; background:#6366F1; border-radius:99px;"></div><div style="width:17%; background:#EF4444; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>Stok Fisik: <b>{sa["stok_fisik_mushaf_tersedia"]:,}</b></span><span>Kurang: <b>({sa["defisit_agust_okt"]}) Pcs</b></span></div></div>')
-        with b3:
-            render_html(f'<div class="bento-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><span style="font-size:12.5px; font-weight:700;">Buku Belajar Super Tahsin</span><span class="badge-pill bp-green">Aman ({sa["bt_total"]:,} Pcs)</span></div><div class="metric-num" style="font-size:22px; font-weight:800; margin-bottom:8px;">{sa["bt_siap"]:,} Siap • {sa["bt_belum"]:,} Proses</div><div style="display:flex; height:9px; border-radius:99px; overflow:hidden; gap:3px; margin-bottom:8px; background:var(--bg-subcard);"><div style="width:48%; background:#10B981; border-radius:99px;"></div><div style="width:52%; background:#F59E0B; border-radius:99px;"></div></div><div style="display:flex; justify-content:space-between; font-size:11px; font-weight:600; color:var(--text-secondary) !important;"><span>Sudah Stiker: <b>{sa["bt_siap"]:,}</b></span><span>Belum Siap: <b>{sa["bt_belum"]:,}</b></span></div></div>')
+        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Total Mushaf Meta LP & TikTok</span><span class="badge-pill bp-indigo">3.447 Pcs Fisik</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{sa["st_siap"]} ST • {sa["mushaf_siap_akumulasi"]} AW Siap</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:32%;background:#10B981;border-radius:99px;"></div><div style="width:68%;background:#F97316;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Meta LP: <b>{sa["meta_lp_total"]:,}</b></span><span>TikTok: <b>{sa["tiktok_mushaf_total"]}</b></span><span>Proses/PO: <b>2.328</b></span></div></div>')
+        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Defisit Mushaf (Agustus – Oktober)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Pcs</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">Kebutuhan {sa["kebutuhan_agust_okt"]:,} Pcs</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:83%;background:#6366F1;border-radius:99px;"></div><div style="width:17%;background:#EF4444;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Stok Fisik: <b>{sa["stok_fisik_mushaf_tersedia"]:,}</b></span><span>Kurang: <b>({sa["defisit_agust_okt"]}) Pcs</b></span></div></div>')
+        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Buku Belajar Super Tahsin</span><span class="badge-pill bp-green">Aman ({sa["bt_total"]:,} Pcs)</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{sa["bt_siap"]:,} Siap • {sa["bt_belum"]:,} Proses</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:48%;background:#10B981;border-radius:99px;"></div><div style="width:52%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Sudah Stiker: <b>{sa["bt_siap"]:,}</b></span><span>Belum Siap: <b>{sa["bt_belum"]:,}</b></span></div></div>')
 
 # ==============================================================================
 # HALAMAN 2: DONASI & SATPAM KEUANGAN (MENAMPILKAN ROAS & ROFI)
@@ -1310,23 +1235,20 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     if not df_d_okt.empty:
         df_d_okt['DT'] = pd.to_datetime(df_d_okt['Tanggal'], errors='coerce').dt.date
         df_d_okt = df_d_okt.dropna(subset=['DT'])
-        raw_max_okt = df_d_okt['DT'].max() if not df_d_okt.empty else datetime.date(2026, 10, 22)
-    else:
-        raw_max_okt = datetime.date(2026, 10, 22)
+        raw_max_okt = df_d_okt['DT'].max() if not df_d_okt.empty else datetime.date(2026, 10, 23)
+    else: raw_max_okt = datetime.date(2026, 10, 23)
     max_dt_okt = clamp_date(raw_max_okt, datetime.date(2026, 10, 1), datetime.date(2026, 10, 31))
 
     with f1_b:
         if cakupan_fin == "Pilih Bulan Historis (Januari – September)":
             bln_terpilih = st.selectbox("2. Pilih Bulan Historis:", [b for b in df_macro['Bulan'].tolist() if b != "Oktober"], key="fin_hist_m")
-            cs_fin_filter = "Semua Tim CS"
-            tgl_range_t1 = (datetime.date(2026, 10, 1), max_dt_okt)
+            cs_fin_filter, tgl_range_t1 = "Semua Tim CS", (datetime.date(2026, 10, 1), max_dt_okt)
         elif cakupan_fin == "Filter Tanggal Harian (Oktober 2026)":
             tgl_range_t1 = st.date_input("2. Pilih Rentang Tanggal Oktober:", value=(datetime.date(2026, 10, 1), max_dt_okt), min_value=datetime.date(2026, 10, 1), max_value=datetime.date(2026, 10, 31), key="fin_dt_range")
             bln_terpilih = "Oktober"
         else:
-            bln_terpilih = "Oktober"
-            tgl_range_t1 = (datetime.date(2026, 10, 1), max_dt_okt)
-            st.selectbox("2. Status Data:", ["Tersinkronisasi Otomatis (Finance + CS)"], disabled=True, key="fin_stat_info")
+            bln_terpilih, tgl_range_t1 = "Oktober", (datetime.date(2026, 10, 1), max_dt_okt)
+            st.selectbox("2. Status Data:", ["Tersinkronisasi Otomatis (Sheet Dashboard CS)"], disabled=True, key="fin_stat_info")
 
     with f1_c:
         if "Oktober" in cakupan_fin:
@@ -1347,20 +1269,21 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
         if isinstance(tgl_range_t1, (list, tuple)) and len(tgl_range_t1) == 2 and not df_d_okt.empty:
             df_d_okt = df_d_okt[(df_d_okt['DT'] >= tgl_range_t1[0]) & (df_d_okt['DT'] <= tgl_range_t1[1])]
         jml_hari = max(1, len(df_d_okt))
-        base_ads = float(db['okt_finance_mon'].get('budget_iklan', 188346708))
+        base_ads = float(db['okt_finance_mon'].get('budget_iklan', 205020588))
+        cutoff_d = max(1, int(db['okt_finance_mon'].get('hari_cutoff', 23)))
         if cs_fin_filter in ["Nisa", "Salma", "Aulia"]:
             d_cs = df_d_okt[cs_fin_filter].sum() if not df_d_okt.empty else 0
             leads_meta_cur = df_d_okt[f"{cs_fin_filter}_Meta"].sum() if not df_d_okt.empty and f"{cs_fin_filter}_Meta" in df_d_okt.columns else d_cs * 0.83
             d_fin = d_cs
             tgt_cs_map = {"Nisa": 200000000, "Salma": 200000000, "Aulia": 50000000}
             t_omz = tgt_cs_map[cs_fin_filter] * (jml_hari / 31.0)
-            b_ads = (base_ads / 3.0) * (jml_hari / 22.0)
+            b_ads = (base_ads / 3.0) * (jml_hari / cutoff_d)
         else:
             d_cs = df_d_okt['Total_Gabungan'].sum() if not df_d_okt.empty else 0
-            leads_meta_cur = df_d_okt['Total_Leads'].sum() if not df_d_okt.empty else d_cs * 0.836
+            leads_meta_cur = df_d_okt['Total_Leads'].sum() if not df_d_okt.empty else d_cs * 0.839
             d_fin = d_cs
             t_omz = 500000000 * (jml_hari / 31.0)
-            b_ads = base_ads * (jml_hari / 22.0)
+            b_ads = base_ads * (jml_hari / cutoff_d)
         m_pcs = max(1, int(round(d_fin / 99000.0)))
         lbl_badge = f"{jml_hari} Hari Okt ({cs_fin_filter})"
     else:
@@ -1370,13 +1293,13 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
             row_src_okt = db['okt_sumber'][db['okt_sumber']['CS / CRM'] == cs_fin_filter]
             t_omz, d_cs, d_fin = float(row_cs_okt['Target (Rp)']), float(row_cs_okt['Bulanan (Total)']), float(row_cs_okt['Bulanan (Final)'])
             b_ads = float(rb['Budget Iklan']) * (d_cs / max(1.0, float(db['okt_kpi']['total_donasi'])))
-            leads_meta_cur = float(row_src_okt['Leads Meta'].iloc[0]) if not row_src_okt.empty else d_cs * 0.83
+            leads_meta_cur = float(row_src_okt['Leads Meta'].iloc[0]) if not row_src_okt.empty else d_cs * 0.839
             m_pcs = max(1, int(round(d_fin / 99000.0)))
             lbl_badge = f"Okt • CS {cs_fin_filter}"
         else:
             t_omz, d_fin, d_cs, b_ads, m_pcs = float(rb['Target Bulanan']), float(rb['Realisasi Finance']), float(rb['Omset CS']), float(rb['Budget Iklan']), float(rb['Mushaf Terverifikasi'])
             non_tot_s = db['okt_sumber'][db['okt_sumber']['CS / CRM'].astype(str).str.upper() != 'TOTAL']
-            leads_meta_cur = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 156226457.0
+            leads_meta_cur = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 161767457.0
             lbl_badge = "Okt 2026"
 
     sk = hitung_satpam_keuangan(t_omz, d_fin, b_ads, m_pcs, leads_meta_val=leads_meta_cur)
@@ -1413,24 +1336,24 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
 
     with g_right:
         render_html(f"""
-        <div class="bento-card" style="min-height:382px; display:flex; flex-direction:column; justify-content:space-between;">
+        <div class="bento-card" style="min-height:382px;display:flex;flex-direction:column;justify-content:space-between;">
             <div>
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px;">
-                    <span style="font-family:'Outfit',sans-serif !important; font-weight:700; font-size:15px;"><i class="ri-calculator-line" style="color:#6366F1 !important;"></i> Satpam Keuangan (ROAS & ROFI)</span>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;">
+                    <span style="font-family:'Outfit',sans-serif!important;font-weight:700;font-size:15px;"><i class="ri-calculator-line" style="color:#6366F1!important;"></i> Satpam Keuangan (ROAS & ROFI)</span>
                     <span class="badge-pill bp-{sk['badge_type']}">{lbl_badge}</span>
                 </div>
-                <div style="font-size:12.2px; color:var(--text-secondary) !important; line-height:2.05;">
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>ROAS Akuisisi Meta / ROFI Total</span><span class="nowrap-val" style="color:#10B981 !important;">{sk['roas_meta']:.2f}x / {sk['rofi_aktual']:.2f}x</span></div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Profit Iklan (Donasi - Ads)</span><span class="nowrap-val" style="color:var(--text-primary) !important;">{rp(sk['profit_iklan'])}</span></div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Beban Operasional (10%)</span><span class="nowrap-val" style="color:var(--text-primary) !important;">{rp(sk['beban_ops_10'])}</span></div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Dana Siap Salur (DSD)</span><span class="nowrap-val" style="color:#6366F1 !important;">{rp(sk['dsd'])}</span></div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Alokasi Mushaf (65% DSD)</span><span class="nowrap-val" style="color:#10B981 !important;">{rp(sk['alokasi_mushaf_65'])}</span></div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px dashed var(--border-soft);"><span>Cadangan Cashback (35%)</span><span class="nowrap-val" style="color:#F59E0B !important;">{rp(sk['cadangan_cashback_35'])}</span></div>
-                    <div style="display:flex; justify-content:space-between;"><span>Target Subsidi CRM CS</span><span class="nowrap-val" style="color:#EF4444 !important;">{rp(sk['target_crm_cs'])}</span></div>
+                <div style="font-size:12.2px;color:var(--text-secondary)!important;line-height:2.05;">
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>ROAS Akuisisi Meta / ROFI Total</span><span class="nowrap-val" style="color:#10B981!important;">{sk['roas_meta']:.2f}x / {sk['rofi_aktual']:.2f}x</span></div>
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>Profit Iklan (Donasi - Ads)</span><span class="nowrap-val" style="color:var(--text-primary)!important;">{rp(sk['profit_iklan'])}</span></div>
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>Beban Operasional (10%)</span><span class="nowrap-val" style="color:var(--text-primary)!important;">{rp(sk['beban_ops_10'])}</span></div>
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>Dana Siap Salur (DSD)</span><span class="nowrap-val" style="color:#6366F1!important;">{rp(sk['dsd'])}</span></div>
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>Alokasi Mushaf (65% DSD)</span><span class="nowrap-val" style="color:#10B981!important;">{rp(sk['alokasi_mushaf_65'])}</span></div>
+                    <div style="display:flex;justify-content:space-between;border-bottom:1px dashed var(--border-soft);"><span>Cadangan Cashback (35%)</span><span class="nowrap-val" style="color:#F59E0B!important;">{rp(sk['cadangan_cashback_35'])}</span></div>
+                    <div style="display:flex;justify-content:space-between;"><span>Target Subsidi CRM CS</span><span class="nowrap-val" style="color:#EF4444!important;">{rp(sk['target_crm_cs'])}</span></div>
                 </div>
             </div>
-            <div class="sub-box" style="margin-top:10px; padding:10px 12px; border-radius:10px; font-size:12px;">
-                <i class="ri-award-line" style="color:#F97316 !important;"></i> <b>Keputusan Sistem:</b> {sk['rekom_tier']}
+            <div class="sub-box" style="margin-top:10px;padding:10px 12px;border-radius:10px;font-size:12px;">
+                <i class="ri-award-line" style="color:#F97316!important;"></i> <b>Keputusan Sistem:</b> {sk['rekom_tier']}
             </div>
         </div>
         """)
@@ -1441,17 +1364,14 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
         "3. Analisis Sumber Kontak & Rasio Kanal ROAS/ROFI (Oktober)",
         "4. Rekapitulasi Makro Bulanan (Jan–Okt)"
     ]
-    if user_role != "Advertiser":
-        opsi_tabel_t1.append("5. Pencarian Riwayat Donatur (Mini CRM)")
-
+    if user_role != "Advertiser": opsi_tabel_t1.append("5. Pencarian Riwayat Donatur (Mini CRM)")
     sub_t1 = st.radio("Pilih Tabel Detail Keuangan & CS:", opsi_tabel_t1, horizontal=True, key="t1_subtable")
 
     if sub_t1.startswith("1."):
         render_rekap_harian_cs_table(df_d_okt, db['avg_cr_okt'])
     elif sub_t1.startswith("2."):
         df_ok = db['okt_cs_table'].copy()
-        if cs_fin_filter != "Semua Tim CS":
-            df_ok = df_ok[df_ok['CS / CRM'].isin([cs_fin_filter, "TOTAL"])]
+        if cs_fin_filter != "Semua Tim CS": df_ok = df_ok[df_ok['CS / CRM'].isin([cs_fin_filter, "TOTAL"])]
         for cr in ['Harian (Total)', 'Harian (Final)', 'Mingguan (Total)', 'Mingguan (Final)', 'Bulanan (Total)', 'Bulanan (Final)', 'Target (Rp)', 'Sisa Target', 'Pending Verifikasi', 'Target Harian (Sisa)']:
             if cr in df_ok.columns: df_ok[cr] = df_ok[cr].apply(rp)
         render_saas_table(df_ok)
@@ -1462,12 +1382,10 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
             for cr in ['Leads Meta', 'Repeat Order CRM', 'Repeat Order non CRM', 'Lainnya', 'Total Nominal']:
                 if cr in df_sr.columns: df_sr[cr] = df_sr[cr].apply(rp)
             render_saas_table(df_sr)
-        with col_s2:
-            render_saas_table(db['okt_kanal_rasio'])
+        with col_s2: render_saas_table(db['okt_kanal_rasio'])
     elif sub_t1.startswith("4."):
         df_show = df_macro.copy()
-        if user_role == "Advertiser" and "Mushaf Terverifikasi" in df_show.columns:
-            df_show.drop(columns=["Mushaf Terverifikasi"], inplace=True)
+        if user_role == "Advertiser" and "Mushaf Terverifikasi" in df_show.columns: df_show.drop(columns=["Mushaf Terverifikasi"], inplace=True)
         for cr in ['Target Bulanan', 'Realisasi Finance', 'Omset CS', 'Selisih Target', 'Selisih Finance vs CS', 'Budget Iklan', 'Total Pengeluaran', 'Laba Bersih']:
             if cr in df_show.columns: df_show[cr] = df_show[cr].apply(rp)
         df_show['% Capaian'] = df_show['% Capaian'].apply(lambda x: f"{x:.1f}%")
@@ -1479,7 +1397,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     else:
         q_d = st.text_input("Ketik Nama Donatur atau Nomor WhatsApp:", placeholder="Contoh: Donatur Prioritas, 628...")
         if q_d:
-            dfc, _ = load_lazy_contacts_db()
+            dfc, _ = load_lazy_contacts_db(current_sync_token)
             m_d = dfc['Nama Donatur'].astype(str).str.contains(q_d, case=False, na=False) | dfc['Nomor Whatsapp'].astype(str).str.contains(q_d, case=False, na=False)
             render_saas_table(dfc[m_d], max_rows=30)
 
@@ -1504,21 +1422,20 @@ elif menu_pilihan == "Performa CS & Leads":
         sum_gab = df_d_okt['Total_Gabungan'].sum() if not df_d_okt.empty else 0
 
         k1, k2, k3, k4 = st.columns(4)
-        with k1: render_bento_kpi("ri-advertisement-line", "indigo", "Total Leads Meta (Okt)", rp_short(sum_leads), "83,6% Porsi Donasi", "indigo", f"Rp {sum_leads:,.0f}".replace(",", "."))
-        with k2: render_bento_kpi("ri-repeat-2-line", "emerald", "Total CRM (Repeat Order)", rp_short(sum_crm), "16,4% Porsi Gabungan", "green", f"Rp {sum_crm:,.0f}".replace(",", "."))
+        with k1: render_bento_kpi("ri-advertisement-line", "indigo", "Total Leads Meta (Okt)", rp_short(sum_leads), "83,9% Porsi Donasi", "indigo", f"Rp {sum_leads:,.0f}".replace(",", "."))
+        with k2: render_bento_kpi("ri-repeat-2-line", "emerald", "Total CRM (Repeat Order)", rp_short(sum_crm), "16,1% Porsi Gabungan", "green", f"Rp {sum_crm:,.0f}".replace(",", "."))
         with k3: render_bento_kpi("ri-funds-box-line", "orange", "Total Gabungan CS (Okt)", rp_short(sum_gab), f"Final: {rp_short(db['okt_kpi']['donasi_final'])}", "orange", f"Rp {sum_gab:,.0f}".replace(",", "."))
-        with k4: render_bento_kpi("ri-percent-line", "emerald", "Rata-Rata CR Bulanan", f"{db['avg_cr_okt']:.1f}%", "Dari Sheet CR/Leads", "green", "1.299 Total Transaksi")
+        with k4: render_bento_kpi("ri-percent-line", "emerald", "Rata-Rata CR Bulanan", f"{db['avg_cr_okt']:.1f}%", "Dari Sheet CR/Leads", "green", "1.344 Total Transaksi")
 
-        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; margin:6px 0;"><i class="ri-table-2" style="color:#FF6B4A !important;"></i> Rekapitulasi Pendapatan Harian per CS (Leads Meta vs CRM) + Kolom CR Harian</div>')
+        render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;margin:6px 0;"><i class="ri-table-2" style="color:#FF6B4A!important;"></i> Rekapitulasi Pendapatan Harian per CS (Leads Meta vs CRM) + Kolom CR Harian</div>')
         render_rekap_harian_cs_table(df_d_okt, db['avg_cr_okt'])
 
     elif mode_evaluasi_cs.startswith("2."):
         df_l = db['leads_okt'].copy()
         df_l['DT'] = pd.to_datetime(df_l['Tanggal'], errors='coerce').dt.date
         df_l = df_l.dropna(subset=['DT'])
-        min_cal_d = datetime.date(2026, 10, 1)
-        max_cal_d = datetime.date(2026, 10, 31)
-        raw_max_l = df_l['DT'].max() if not df_l.empty else datetime.date(2026, 10, 22)
+        min_cal_d, max_cal_d = datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)
+        raw_max_l = df_l['DT'].max() if not df_l.empty else datetime.date(2026, 10, 23)
         safe_max_l = clamp_date(raw_max_l, min_cal_d, max_cal_d)
 
         f2_1, f2_2, f2_3 = st.columns(3)
@@ -1528,17 +1445,12 @@ elif menu_pilihan == "Performa CS & Leads":
 
         if isinstance(tgl_l, (list, tuple)) and len(tgl_l) == 2:
             df_l = df_l[(df_l['DT'] >= tgl_l[0]) & (df_l['DT'] <= tgl_l[1])]
-        if pilih_cs in ["Nisa", "Salma", "Aulia"]:
-            df_l = df_l[df_l['Nama CS'] == pilih_cs]
+        if pilih_cs in ["Nisa", "Salma", "Aulia"]: df_l = df_l[df_l['Nama CS'] == pilih_cs]
 
-        if pilih_prog == "SantriQu":
-            df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["SantriQu_Leads"], df_l["SantriQu_Closing"], df_l["SantriQu_Nominal"]
-        elif pilih_prog == "AmalQu":
-            df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["AmalQu_Leads"], df_l["AmalQu_Closing"], df_l["AmalQu_Nominal"]
-        elif pilih_prog == "JariyahQu":
-            df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["JariyahQu_Leads"], df_l["JariyahQu_Closing"], df_l["JariyahQu_Nominal"]
-        else:
-            df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["Chat Valid"], df_l["Closing"], df_l["Nominal"]
+        if pilih_prog == "SantriQu": df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["SantriQu_Leads"], df_l["SantriQu_Closing"], df_l["SantriQu_Nominal"]
+        elif pilih_prog == "AmalQu": df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["AmalQu_Leads"], df_l["AmalQu_Closing"], df_l["AmalQu_Nominal"]
+        elif pilih_prog == "JariyahQu": df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["JariyahQu_Leads"], df_l["JariyahQu_Closing"], df_l["JariyahQu_Nominal"]
+        else: df_l["Leads_Aktif"], df_l["Closing_Aktif"], df_l["Nominal_Aktif"] = df_l["Chat Valid"], df_l["Closing"], df_l["Nominal"]
 
         tv, ti, tc, tn = int(df_l['Leads_Aktif'].sum()), int(df_l['Chat Invalid'].sum()), int(df_l['Closing_Aktif'].sum()), float(df_l['Nominal_Aktif'].sum())
         cr_okt = (tc / tv * 100) if tv > 0 else 0.0
@@ -1561,8 +1473,7 @@ elif menu_pilihan == "Performa CS & Leads":
             st.plotly_chart(fig_cs, use_container_width=True)
         with cl_r:
             render_chart_header("Conversion Rate (CR)", f"Rata-rata CR {pilih_prog}", f"{cr_okt:.1f}%", "green")
-            fig_g_cs = make_gauge_chart(round(cr_okt, 1), max_val=100, suffix="%", bar_color="#10B981")
-            st.plotly_chart(fig_g_cs, use_container_width=True)
+            st.plotly_chart(make_gauge_chart(round(cr_okt, 1), max_val=100, suffix="%", bar_color="#10B981"), use_container_width=True)
 
         df_l_show = df_l[["Tanggal", "Nama CS", "Leads_Aktif", "Chat Invalid", "Closing_Aktif", "Conv Rate (%)", "Nominal_Aktif", "SantriQu_Closing", "AmalQu_Closing", "JariyahQu_Closing", "Total Follow Up"]].copy()
         df_l_show.rename(columns={"Leads_Aktif": f"Leads ({pilih_prog})", "Closing_Aktif": f"Closing ({pilih_prog})", "Nominal_Aktif": f"Nominal ({pilih_prog})"}, inplace=True)
@@ -1610,15 +1521,14 @@ elif menu_pilihan == "Logistik & Gudang":
 
     t_left, t_right = st.columns(2)
     with t_left:
-        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15px; font-weight:800; margin:4px 0;"><i class="ri-list-check-2" style="color:#10B981 !important;"></i> RINCIAN INVENTARIS STOK PER PRODUK & KANAL</div>')
+        render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15px;font-weight:800;margin:4px 0;"><i class="ri-list-check-2" style="color:#10B981!important;"></i> RINCIAN INVENTARIS STOK PER PRODUK & KANAL</div>')
         df_inv_show = db['stok_rincian_baru'].copy()
         for cn in ["Siap Salur (Stiker)", "Belum Siap (Proses)", "Total Stok Fisik"]:
-            if cn in df_inv_show.columns:
-                df_inv_show[cn] = df_inv_show[cn].apply(lambda x: f"{int(num_clean(x)):,}".replace(",", "."))
+            if cn in df_inv_show.columns: df_inv_show[cn] = df_inv_show[cn].apply(lambda x: f"{int(num_clean(x)):,}".replace(",", "."))
         render_saas_table(df_inv_show)
 
     with t_right:
-        render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15px; font-weight:800; margin:4px 0;"><i class="ri-error-warning-line" style="color:#EF4444 !important;"></i> ANALISIS TARGET & DEFISIT PENGADAAN MUSHAF (AGUST–OKT 2026)</div>')
+        render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15px;font-weight:800;margin:4px 0;"><i class="ri-error-warning-line" style="color:#EF4444!important;"></i> ANALISIS TARGET & DEFISIT PENGADAAN MUSHAF (AGUST–OKT 2026)</div>')
         render_saas_table(db['stok_defisit_baru'])
 
     lg_l, lg_r = st.columns([1.5, 1.3])
@@ -1668,18 +1578,17 @@ elif menu_pilihan == "Kalender Distribusi":
     for _, r_k in df_kal.iterrows():
         tgl_s = str(r_k.get("Tanggal Agenda", "")).strip()
         m_day = re.search(r'-(\d{1,2})$', tgl_s)
-        if m_day:
-            events_by_day.setdefault(int(m_day.group(1)), []).append(r_k)
+        if m_day: events_by_day.setdefault(int(m_day.group(1)), []).append(r_k)
 
     cells_list = ['<div class="cal-cell-empty"></div>' for _ in range(3)]
     for day_num in range(1, 32):
         if day_num in events_by_day:
             ev_list = events_by_day[day_num]
             tot_pcs_day = sum(int(num_clean(x.get("Jumlah Mushaf (Pcs)", 0))) for x in ev_list)
-            items_html = "".join([f'<div class="cal-item-pill"><b>{str(x.get("Nama Lembaga Penerima",""))[:22]}</b><br><span style="color:#F97316 !important; font-weight:700;">{int(num_clean(x.get("Jumlah Mushaf (Pcs)",0)))} Pcs</span> • {str(x.get("Variasi Mushaf",""))}</div>' for x in ev_list])
-            cells_list.append(f'<div class="cal-cell-active"><div class="cal-day-num"><span>{day_num} Okt</span><span class="badge-pill bp-orange" style="padding:2px 6px; font-size:10px;">{tot_pcs_day} Pcs</span></div><div>{items_html}</div></div>')
+            items_html = "".join([f'<div class="cal-item-pill"><b>{str(x.get("Nama Lembaga Penerima",""))[:22]}</b><br><span style="color:#F97316!important;font-weight:700;">{int(num_clean(x.get("Jumlah Mushaf (Pcs)",0)))} Pcs</span> • {str(x.get("Variasi Mushaf",""))}</div>' for x in ev_list])
+            cells_list.append(f'<div class="cal-cell-active"><div class="cal-day-num"><span>{day_num} Okt</span><span class="badge-pill bp-orange" style="padding:2px 6px;font-size:10px;">{tot_pcs_day} Pcs</span></div><div>{items_html}</div></div>')
         else:
-            cells_list.append(f'<div class="cal-cell"><div class="cal-day-num"><span>{day_num} Okt</span></div><div style="font-size:10px; color:var(--text-muted) !important;">-</div></div>')
+            cells_list.append(f'<div class="cal-cell"><div class="cal-day-num"><span>{day_num} Okt</span></div><div style="font-size:10px;color:var(--text-muted)!important;">-</div></div>')
     cells_list.append('<div class="cal-cell-empty"></div>')
     desktop_cal_str = "".join(cells_list)
 
@@ -1687,15 +1596,15 @@ elif menu_pilihan == "Kalender Distribusi":
     for day_num in sorted(events_by_day.keys()):
         ev_list = events_by_day[day_num]
         tot_pcs_day = sum(int(num_clean(x.get("Jumlah Mushaf (Pcs)", 0))) for x in ev_list)
-        items_html = "".join([f'<div class="cal-item-pill"><b>{str(x.get("Nama Lembaga Penerima",""))}</b><br><span style="color:#F97316 !important; font-weight:700;">{int(num_clean(x.get("Jumlah Mushaf (Pcs)",0)))} Pcs ({str(x.get("Variasi Mushaf",""))})</span> • PIC: {str(x.get("Nama PIC",""))}<br><span style="color:var(--text-muted) !important;">Lokasi: {str(x.get("Wilayah / Titik Lokasi",""))}</span></div>' for x in ev_list])
+        items_html = "".join([f'<div class="cal-item-pill"><b>{str(x.get("Nama Lembaga Penerima",""))}</b><br><span style="color:#F97316!important;font-weight:700;">{int(num_clean(x.get("Jumlah Mushaf (Pcs)",0)))} Pcs ({str(x.get("Variasi Mushaf",""))})</span> • PIC: {str(x.get("Nama PIC",""))}<br><span style="color:var(--text-muted)!important;">Lokasi: {str(x.get("Wilayah / Titik Lokasi",""))}</span></div>' for x in ev_list])
         mobile_cards += f'<div class="cal-cell-active" style="margin-bottom:10px;"><div class="cal-day-num"><span>{day_num} Oktober 2026</span><span class="badge-pill bp-orange">{len(ev_list)} Titik • {tot_pcs_day} Pcs</span></div><div>{items_html}</div></div>'
 
     render_html(f"""
     <div class="bento-card">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
             <div>
-                <span style="font-family:'Outfit',sans-serif !important; font-weight:800; font-size:16.5px;"><i class="ri-calendar-todo-fill" style="color:#FF6B4A !important;"></i> Kalender Visual Distribusi Mushaf — Oktober 2026</span>
-                <div style="font-size:12px; color:var(--text-secondary) !important;">Super Tajwid: <b>{sa['st_jadwal']} Pcs</b> (Stok Siap {sa['st_siap']} Pcs) &nbsp;|&nbsp; Al-Wakaf: <b>{sa['aw_jadwal']} Pcs</b> (Stok Siap {sa['aw_total_siap']} Pcs)</div>
+                <span style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:16.5px;"><i class="ri-calendar-todo-fill" style="color:#FF6B4A!important;"></i> Kalender Visual Distribusi Mushaf — Oktober 2026</span>
+                <div style="font-size:12px;color:var(--text-secondary)!important;">Super Tajwid: <b>{sa['st_jadwal']} Pcs</b> (Stok Siap {sa['st_siap']} Pcs) &nbsp;|&nbsp; Al-Wakaf: <b>{sa['aw_jadwal']} Pcs</b> (Stok Siap {sa['aw_total_siap']} Pcs)</div>
             </div>
             <span class="badge-pill bp-orange"><i class="ri-map-pin-time-line"></i> {tot_agenda_kal} Titik Distribusi Aktif</span>
         </div>
@@ -1705,7 +1614,7 @@ elif menu_pilihan == "Kalender Distribusi":
     """)
 
     f_kal_1, f_kal_2 = st.columns([2.5, 1])
-    with f_kal_1: render_html('<div style="font-family:\'Outfit\',sans-serif !important; font-size:15.5px; font-weight:700; padding-top:8px;"><i class="ri-table-line" style="color:#6366F1 !important;"></i> Rincian Agenda Distribusi Scheduled (Sheet Kalender Oktober 2026 • Kolom A–J)</div>')
+    with f_kal_1: render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;padding-top:8px;"><i class="ri-table-line" style="color:#6366F1!important;"></i> Rincian Agenda Distribusi Scheduled (Sheet Kalender Oktober 2026 • Kolom A–J)</div>')
     with f_kal_2: pilih_var_kal = st.selectbox("Filter Variasi Mushaf:", ["Semua Variasi", "Super Tajwid", "Al Wakaf Tiktok"], key="kal_var")
     df_kal_disp = df_kal[df_kal["Variasi Mushaf"] == pilih_var_kal].copy() if pilih_var_kal != "Semua Variasi" and "Variasi Mushaf" in df_kal.columns else df_kal.copy()
     cols_aj_display = [c for c in ["No", "Tanggal Agenda", "ID Proyek", "Nama Lembaga Penerima", "Nama PIC", "Kontak WA", "Wilayah / Titik Lokasi", "Jumlah Mushaf (Pcs)", "Variasi Mushaf", "Status"] if c in df_kal_disp.columns]
@@ -1715,13 +1624,12 @@ elif menu_pilihan == "Kalender Distribusi":
 # HALAMAN 6: DATABASE & SMART WA BLAST ENGINE (FULL REALTIME DARI SPREADSHEET)
 # ==============================================================================
 elif menu_pilihan == "Database & WA Blast":
-    df_all_c, is_sample_db = load_lazy_contacts_db()
+    df_all_c, is_sample_db = load_lazy_contacts_db(current_sync_token)
     dk = db['db_kpi'].copy()
     if not is_sample_db and len(df_all_c) > 10:
         dk['total_donatur'] = len(df_all_c)
         cb_cnt = int(df_all_c['Reminder'].astype(str).str.upper().str.contains('CALLBACK').sum())
-        if cb_cnt > 0:
-            dk['callback_segera'] = cb_cnt
+        if cb_cnt > 0: dk['callback_segera'] = cb_cnt
 
     d1, d2, d3, d4 = st.columns(4)
     with d1: render_bento_kpi("ri-user-follow-line", "emerald", "Donatur Terkonfirmasi", f"{dk['total_donatur']:,}".replace(",", "."), f"Konversi {dk['konversi_pct']}%", "green", f"Kontak: {dk['total_kontak']:,}")
@@ -1729,7 +1637,7 @@ elif menu_pilihan == "Database & WA Blast":
     with d3: render_bento_kpi("ri-vip-diamond-line", "indigo", "Total Donasi Kumulatif", rp_short(dk['total_donasi_kumulatif']), f"LTV: {rp(dk['rata_rata_donasi'])}", "indigo", "Rata-rata / Donatur")
     with d4: render_bento_kpi("ri-notification-badge-line", "rose", "Status Callback Segera", f"{dk.get('callback_segera', 12285):,} Kontak".replace(",", "."), "Prioritas Utama CRM", "red", "Siap Broadcast WA")
 
-    render_html('<div class="bento-card" style="margin-bottom:12px;"><div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;"><div><span style="font-family:\'Outfit\',sans-serif !important; font-size:16px; font-weight:800;"><i class="ri-send-plane-fill" style="color:#FF6B4A !important;"></i> Smart Broadcast (BC) Engine — Generator CSV 2 Kolom (Senin & Jumat)</span><div style="font-size:12px; color:var(--text-secondary) !important; margin-top:2px;">Pilih jadwal kampanye BC Anda. Sistem menyaring database real-time menjadi file CSV 2 kolom (<b>phone number</b>, <b>nama</b>) siap pakai.</div></div><span class="badge-pill bp-indigo"><i class="ri-file-excel-2-line"></i> Auto-Clean WA Format</span></div></div>')
+    render_html('<div class="bento-card" style="margin-bottom:12px;"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;"><div><span style="font-family:\'Outfit\',sans-serif!important;font-size:16px;font-weight:800;"><i class="ri-send-plane-fill" style="color:#FF6B4A!important;"></i> Smart Broadcast (BC) Engine — Generator CSV 2 Kolom (Senin & Jumat)</span><div style="font-size:12px;color:var(--text-secondary)!important;margin-top:2px;">Pilih jadwal kampanye BC Anda. Sistem menyaring database real-time menjadi file CSV 2 kolom (<b>phone number</b>, <b>nama</b>) siap pakai.</div></div><span class="badge-pill bp-indigo"><i class="ri-file-excel-2-line"></i> Auto-Clean WA Format</span></div></div>')
 
     b_left, b_right = st.columns([2.1, 1])
     with b_left:
@@ -1778,7 +1686,7 @@ elif menu_pilihan == "Database & WA Blast":
         else:
             jml_label = f"{len(df_out):,} Kontak".replace(",", ".")
 
-        render_html(f'<div class="bento-card" style="border:1.5px dashed #FB923C; text-align:center; padding:18px;"><div style="font-size:11px; font-weight:700; color:#F97316 !important; letter-spacing:0.6px;">TARGET AUDIENS TERPILIH</div><div class="metric-num" style="font-size:26px; font-weight:800; margin:6px 0;">{jml_label}</div><div style="font-size:11.5px; color:var(--text-secondary) !important;">Format: <b>phone number</b>, <b>nama</b></div></div>')
+        render_html(f'<div class="bento-card" style="border:1.5px dashed #FB923C;text-align:center;padding:18px;"><div style="font-size:11px;font-weight:700;color:#F97316!important;letter-spacing:0.6px;">TARGET AUDIENS TERPILIH</div><div class="metric-num" style="font-size:26px;font-weight:800;margin:6px 0;">{jml_label}</div><div style="font-size:11.5px;color:var(--text-secondary)!important;">Format: <b>phone number</b>, <b>nama</b></div></div>')
         st.download_button(label="Download CSV 2 Kolom (WA Blast)", data=df_out.to_csv(index=False).encode('utf-8'), file_name=f"WA_Blast_AmalQu_{now_wib().strftime('%Y%m%d')}.csv", mime="text/csv", use_container_width=True)
 
     sub_t5 = st.radio(
@@ -1790,12 +1698,10 @@ elif menu_pilihan == "Database & WA Blast":
         ],
         horizontal=True, key="t5_sub"
     )
-    if sub_t5.startswith("1."):
-        render_saas_table(db['db_segmentasi'])
+    if sub_t5.startswith("1."): render_saas_table(db['db_segmentasi'])
     elif sub_t5.startswith("2."):
         col_r1, col_r2 = st.columns(2)
         with col_r1: render_saas_table(db['db_reminder'])
         with col_r2: render_saas_table(db['db_status_donatur'])
-    else:
-        render_saas_table(df_tgt, max_rows=50)
+    else: render_saas_table(df_tgt, max_rows=50)
 # === END OF FILE ===
