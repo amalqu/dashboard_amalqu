@@ -3,13 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import os, re, io, datetime, time, urllib.request
+import os, re, io, json, datetime, time, urllib.request
 from datetime import timezone, timedelta
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
-# 1. KONFIGURASI HALAMAN, ZONA WAKTU WIB (UTC+7) & STATE
+# 1. KONFIGURASI HALAMAN, FIREBASE URL, ZONA WAKTU WIB (UTC+7) & STATE
 # ==============================================================================
 st.set_page_config(
     page_title="AmalQu — Yayasan AmalQu Indonesia Peduli",
@@ -18,7 +18,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+FIREBASE_BASE_URL = "https://amalqu-dashboard-default-rtdb.asia-southeast1.firebasedatabase.app"
 TZ_WIB = timezone(timedelta(hours=7))
+
 def now_wib():
     return datetime.datetime.now(TZ_WIB)
 
@@ -118,7 +120,7 @@ def hitung_satpam_keuangan(target_omzet, donasi_masuk, biaya_iklan, kebutuhan_mu
     }
 
 # ==============================================================================
-# 3. KONFIGURASI AKUN LOGIN & 16 ID GOOGLE SHEETS
+# 3. KONFIGURASI AKUN LOGIN & ID GOOGLE SHEETS
 # ==============================================================================
 ALL_MENUS = ["Dashboard Overview", "Donasi & Satpam Keuangan", "Performa CS & Leads", "Logistik & Gudang", "Kalender Distribusi", "Database & WA Blast"]
 AUTH_USERS = {
@@ -141,50 +143,40 @@ SHEETS_CONFIG = {
     "master_db":       ("1zeTDweSHvALQEriL7D1n7JLNAoBcPkq8i57mRKHlS3U", "1827422698"),
     "stok_mushaf":     ("1p2fISiecchH84LUvdpEbzPsa3YQq_HAVCUvbfJTwxvE", "104"),
     "kalender_dist":   ("159nbvj-on-SM5YwcQGHp8ffzJFY7gj7AUAptpRl0wJA", "1940610974"),
-    "bulan_januari":   ("1DRt5hyKSPrXDTQ32WYLPJT5Ymn6liaaV1JEeBtgKmXY", "0"),
-    "bulan_februari":  ("1LDFAQhTOFBneoQnvABfxtS0cuu-9jpizIwwJh50y59s", "0"),
-    "bulan_maret":     ("1FjECEskDf8xLUD8f1JUBvdhFExYsOBFxtnlMGbZAEJw", "72725914"),
-    "bulan_april":     ("1qrZ_EzJU2ZFxBDtN3s4aCG_KjZkU8iP36oqKjfvpZTg", "72725914"),
-    "bulan_mei":       ("1081ZvEdY0pJ8s5WUrpSNVmG5w1Y2WYdwMf1RSPa7-Rc", "1827422698"),
-    "bulan_juni":      ("12BABknQvNDAiOVUQo_Rn4MTLQ67X7ufavULf5Kr-LS4", "838945917"),
-    "bulan_juli":      ("15UMuw7YCdvuXhgqBPYeU3rnBZ-Tzcr-MXUOACS9yew4", "838945917"),
-    "bulan_agustus":   ("1b-U4A33CqWL0_4NL88xyWgEHHOtS5xL6jmcmNH1oeuI", "198428192"),
-    "bulan_september": ("1r2vurU0oQxHRwvxD0DfspfmNmBza6hXlfco65FK8AmY", "170644840"),
     "bulan_oktober":   ("10UJz62vYB4m86TC_WbOIfbgUYLp8gnfFo8-nNk_W180", "170644840"),
 }
 
+def fetch_firebase_json():
+    """Menarik seluruh paket data real-time dari Firebase Realtime Database (< 0.2 detik)."""
+    url = f"{FIREBASE_BASE_URL.rstrip('/')}/amalqu_live.json?cb={int(time.time()*1000)}"
+    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data if isinstance(data, dict) else {}
+
+def grid_to_df(grid_obj):
+    """Mengubah array 2D dari Firebase menjadi DataFrame Pandas yang rapi."""
+    if not grid_obj or not isinstance(grid_obj, list):
+        return pd.DataFrame()
+    max_len = max((len(r) for r in grid_obj if isinstance(r, list)), default=0)
+    if max_len == 0:
+        return pd.DataFrame()
+    norm_rows = []
+    for r in grid_obj:
+        if isinstance(r, list):
+            row_s = [str(x).strip() if x is not None else "" for x in r]
+            if len(row_s) < max_len:
+                row_s.extend([""] * (max_len - len(row_s)))
+            norm_rows.append(row_s)
+    return pd.DataFrame(norm_rows, dtype=str).fillna("")
+
 def read_csv_nocache(url: str):
-    req = urllib.request.Request(url, headers={
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache", "Expires": "0",
-        "User-Agent": f"AmalQu-Live/{int(time.time()*1000)}"
-    })
-    with urllib.request.urlopen(req, timeout=12) as resp:
+    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "AmalQu-Live/16.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
         return pd.read_csv(io.BytesIO(resp.read()), header=None, dtype=str).fillna("")
 
-def fetch_fast_grid(key_name, sheet_name=None, prefer_sheet=True):
-    if key_name not in SHEETS_CONFIG: return pd.DataFrame()
-    sid, gid = SHEETS_CONFIG[key_name]
-    cb = int(time.time() * 1000)
-    base = f"https://docs.google.com/spreadsheets/d/{sid}"
-    urls = []
-    if sheet_name and prefer_sheet:
-        urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&sheet={quote(sheet_name)}&cb={cb}")
-    urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&gid={gid}&cb={cb}")
-    urls.append(f"{base}/export?format=csv&gid={gid}&cb={cb}")
-    if sheet_name and not prefer_sheet:
-        urls.append(f"{base}/gviz/tq?tqx=out:csv&headers=0&sheet={quote(sheet_name)}&cb={cb}")
-    for u in urls:
-        try:
-            df = read_csv_nocache(u)
-            if not df.empty and df.shape[1] >= 2:
-                fc = str(df.iat[0, 0]).strip().lower()
-                if "<!doctype" not in fc and "<html" not in fc: return df
-        except: continue
-    return pd.DataFrame()
-
 # ==============================================================================
-# 4. CSS SYSTEM & LOGIN GATE
+# 4. CSS SYSTEM (ANTI-OVERFLOW & RESPONSIVE FLUID TYPOGRAPHY)
 # ==============================================================================
 is_dark = st.session_state.dark_mode
 css_vars = (
@@ -228,15 +220,16 @@ div[data-baseweb="popover"],ul[role="listbox"],li[role="option"]{{background-col
 button[kind="primary"],button[kind="secondary"],[data-testid="stDownloadButton"] button{{background:var(--bg-card)!important;color:var(--text-primary)!important;border:1px solid var(--border-strong)!important;border-radius:12px!important;font-weight:700!important;padding:8px 14px!important;}}
 [data-testid="stFormSubmitButton"] button{{background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%)!important;color:#FFFFFF!important;border:none!important;border-radius:12px!important;padding:11px 18px!important;}}
 [data-testid="stFormSubmitButton"] button p{{color:#FFFFFF!important;font-weight:700!important;}}
-.bento-card,[data-testid="stForm"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-radius:18px!important;padding:18px 20px!important;box-shadow:0 4px 18px -2px rgba(0,0,0,0.05)!important;margin-bottom:14px!important;}}
-.kpi-uniform{{height:148px;display:flex;flex-direction:column;justify-content:space-between;}}
-.hero-card{{background:linear-gradient(135deg,#4F46E5 0%,#6366F1 55%,#8B5CF6 100%);border-radius:18px;padding:18px 20px;height:148px;display:flex;flex-direction:column;justify-content:space-between;color:#FFFFFF!important;box-shadow:0 10px 24px -6px rgba(79,70,229,0.4);margin-bottom:14px;}}
+.bento-card,[data-testid="stForm"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-radius:18px!important;padding:16px 18px!important;box-shadow:0 4px 18px -2px rgba(0,0,0,0.05)!important;margin-bottom:14px!important;overflow:hidden!important;}}
+.kpi-uniform{{min-height:146px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;}}
+.hero-card{{background:linear-gradient(135deg,#4F46E5 0%,#6366F1 55%,#8B5CF6 100%);border-radius:18px;padding:16px 18px;min-height:146px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;color:#FFFFFF!important;box-shadow:0 10px 24px -6px rgba(79,70,229,0.4);margin-bottom:14px;overflow:hidden!important;}}
 .hero-card *{{color:#FFFFFF!important;}}
+.kpi-val-fluid{{font-family:'Outfit',sans-serif!important;font-size:clamp(17px,1.55vw,23px)!important;font-weight:800!important;line-height:1.2!important;letter-spacing:-0.4px;word-break:break-word!important;}}
 .chart-header-box{{background:var(--bg-card);border:1px solid var(--border-soft);border-bottom:none;border-radius:18px 18px 0 0;padding:16px 20px 8px 20px;margin-bottom:-16px;position:relative;z-index:2;}}
 [data-testid="stPlotlyChart"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-top:none!important;border-radius:0 0 18px 18px!important;padding:4px 12px 8px 12px!important;margin-bottom:14px!important;}}
-.icon-box{{width:36px;height:36px;border-radius:10px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:17px;}}
+.icon-box{{width:34px;height:34px;border-radius:10px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:16px;}}
 .ib-indigo{{background:rgba(79,70,229,0.15);color:#6366F1!important;}}.ib-orange{{background:rgba(249,115,22,0.15);color:#F97316!important;}}.ib-emerald{{background:rgba(16,185,129,0.15);color:#10B981!important;}}.ib-rose{{background:rgba(239,68,68,0.15);color:#EF4444!important;}}
-.badge-pill{{font-size:10.5px;font-weight:700;padding:3.5px 9px;border-radius:99px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap!important;flex-shrink:0;}}
+.badge-pill{{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:99px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap!important;max-width:100%;overflow:hidden;text-overflow:ellipsis;}}
 .bp-green{{background:rgba(16,185,129,0.16);color:#10B981!important;}}.bp-red{{background:rgba(239,68,68,0.16);color:#EF4444!important;}}.bp-orange{{background:rgba(249,115,22,0.16);color:#F97316!important;}}.bp-indigo{{background:rgba(79,70,229,0.16);color:#6366F1!important;}}
 .nowrap-val{{white-space:nowrap!important;font-weight:700;}}
 .saas-table-wrap{{background:var(--bg-card);border:1px solid var(--border-soft);border-radius:18px;overflow-x:auto;margin-top:8px;margin-bottom:16px;}}
@@ -255,7 +248,7 @@ button[kind="primary"],button[kind="secondary"],[data-testid="stDownloadButton"]
 .cal-cell-active{{background:var(--cal-active-bg);border:1.5px solid #FB923C;border-radius:12px;min-height:96px;padding:8px 10px;}}
 .cal-day-num{{font-family:'Outfit',sans-serif!important;font-size:13px;font-weight:700;color:var(--text-primary)!important;display:flex;justify-content:space-between;align-items:center;gap:4px;}}
 .cal-item-pill{{background:var(--cal-pill-bg);border:1px solid var(--border-soft);border-left:3px solid #F97316;border-radius:6px;padding:4px 6px;margin-top:4px;font-size:10.5px;color:var(--text-primary)!important;line-height:1.25;}}
-@media screen and (max-width:768px){{.block-container{{padding-left:12px!important;padding-right:12px!important;padding-top:2.8rem!important;}}div[data-testid="stHorizontalBlock"]{{flex-wrap:wrap!important;}}div[data-testid="column"]{{width:100%!important;flex:1 1 100%!important;min-width:100%!important;}}.kpi-uniform,.hero-card{{height:auto!important;min-height:132px!important;}}.cal-desktop-only{{display:none!important;}}.cal-mobile-only{{display:block!important;}}}}
+@media screen and (max-width:768px){{.block-container{{padding-left:12px!important;padding-right:12px!important;padding-top:2.8rem!important;}}div[data-testid="stHorizontalBlock"]{{flex-wrap:wrap!important;}}div[data-testid="column"]{{width:100%!important;flex:1 1 100%!important;min-width:100%!important;}}.cal-desktop-only{{display:none!important;}}.cal-mobile-only{{display:block!important;}}}}
 </style>
 """)
 
@@ -287,7 +280,7 @@ user_role = current_user.get("role", "Admin")
 allowed_menus = current_user.get("menus", ["Dashboard Overview"])
 
 # ==============================================================================
-# 5. MERGE-SAFE PARSERS UNTUK DASHBOARD CS, STOK MUSHAF & DATABASE
+# 5. MERGE-SAFE PARSERS UNTUK DATA FIREBASE & SPREADSHEET
 # ==============================================================================
 def extract_anchored_table(df_raw, anchor1, anchor2=None, stop_words=None, max_rows=100, max_cols=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
@@ -361,7 +354,6 @@ def parse_rekap_harian_cs_2row(grid_okt):
     return pd.DataFrame(rows)
 
 def parse_monitoring_roas_finance(grid_okt):
-    """Pemindai Anti-Merge untuk Kolom J-N (Monitoring ROAS Finance) dan Kolom B-H (Kanal/Metrik Donasi)."""
     res, kanal_rows = {}, []
     if grid_okt is None or grid_okt.empty: return res, pd.DataFrame()
     nrows, ncols = grid_okt.shape
@@ -462,9 +454,9 @@ def parse_live_leads_tab(grid_cs, cs_label):
     return rows_extracted
 
 # ==============================================================================
-# 6. TRUE AUTO-SYNC ENGINE (REFRESH OTOMATIS TIAP 60 DETIK + INSTANT NONCE)
+# 6. FIREBASE REALTIME ENGINE (MEMBACA JANUARI-OKTOBER < 0.3 DETIK)
 # ==============================================================================
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def load_core_realtime_data(sync_token: int):
     db, sync_status = {}, {}
 
@@ -587,30 +579,45 @@ def load_core_realtime_data(sync_token: int):
         {"Status Donatur": "Donatur Aktif", "Jumlah Donatur": 492, "Persentase (%)": "3,40%"},
         {"Status Donatur": "Donatur Rutin", "Jumlah Donatur": 145, "Persentase (%)": "1,00%"},
     ])
+    db['packing_dus_bulanan'] = pd.DataFrame([
+        {"Bulan": "Januari",   "Total Mushaf Terverifikasi": 2356, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2356},
+        {"Bulan": "Februari",  "Total Mushaf Terverifikasi": 1906, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1906},
+        {"Bulan": "Maret",     "Total Mushaf Terverifikasi": 3814, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3814},
+        {"Bulan": "April",     "Total Mushaf Terverifikasi": 2225, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2225},
+        {"Bulan": "Mei",       "Total Mushaf Terverifikasi": 1454, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1454},
+        {"Bulan": "Juni",      "Total Mushaf Terverifikasi": 4103, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 4103},
+        {"Bulan": "Juli",      "Total Mushaf Terverifikasi": 3586, "Verifikasi (Belum Stiker)": 1,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3585},
+        {"Bulan": "Agustus",   "Total Mushaf Terverifikasi": 2852, "Verifikasi (Belum Stiker)": 12,   "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 2840, "Distribusi Selesai": 0},
+        {"Bulan": "September", "Total Mushaf Terverifikasi": 2599, "Verifikasi (Belum Stiker)": 1972, "Penamaan Mushaf (Stiker)": 447, "Packing / Proses Distribusi": 180,  "Distribusi Selesai": 0},
+        {"Bulan": "Oktober",   "Total Mushaf Terverifikasi": 946,  "Verifikasi (Belum Stiker)": 846,  "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 100},
+    ])
 
-    tasks = {
-        "ov":      ("data_cs", "Overview_Semua_CS", True),
-        "okt":     ("bulan_oktober", "Dashboard CS", True),
-        "l_nisa":  ("leads_cs", "CS NISA", True),
-        "l_salma": ("leads_cs", "CS SALMA", True),
-        "l_aulia": ("leads_cs", "CS AUL", True),
-        "stok":    ("stok_mushaf", None, False),
-        "kal":     ("kalender_dist", "Kalender Oktober 2026", True),
-        "db_set":  ("master_db", "SETTING DASHBOARD", True),
-    }
-    fetched = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        fut_map = {ex.submit(fetch_fast_grid, k_nm, sh_nm, p_sh): tag for tag, (k_nm, sh_nm, p_sh) in tasks.items()}
-        for fut in as_completed(fut_map):
-            tag = fut_map[fut]
-            try: fetched[tag] = fut.result()
-            except: fetched[tag] = pd.DataFrame()
+    # TARIK DATA REAL-TIME DARI FIREBASE AMALQU
+    fb_data = {}
+    try:
+        fb_data = fetch_firebase_json()
+    except:
+        fb_data = {}
 
-    g_ov = fetched.get("ov", pd.DataFrame())
+    fb_connected = bool(fb_data and len(fb_data) >= 2)
+    db['firebase_connected'] = fb_connected
+    fb_time_str = str(fb_data.get("updated_at", "")).strip()
+
+    g_ov = grid_to_df(fb_data.get("overview_semua_cs", []))
+    g_okt = grid_to_df(fb_data.get("okt_dashboard_cs", []))
+    g_l_nisa = grid_to_df(fb_data.get("leads_nisa", []))
+    g_l_salma = grid_to_df(fb_data.get("leads_salma", []))
+    g_l_aulia = grid_to_df(fb_data.get("leads_aulia", []))
+    g_stok = grid_to_df(fb_data.get("stok_monitoring", []))
+    g_pack = grid_to_df(fb_data.get("stok_packing", []))
+    g_kal = grid_to_df(fb_data.get("kalender_okt", []))
+    g_db_set = grid_to_df(fb_data.get("db_setting", []))
+
+    # 1. PROSES JANUARI-SEPTEMBER (DARI OVERVIEW_SEMUA_CS DI FIREBASE)
     if not g_ov.empty:
         t_fin_live = extract_anchored_table(g_ov, "Bulan", "Target Bulanan", stop_words=["Total Target", "Sisa Target"], max_rows=15)
         if not t_fin_live.empty:
-            sync_status["Data CS & Finance"] = f"Live ({len(t_fin_live)} bln)"
+            sync_status["Data Makro (Jan–Sep)"] = f"Firebase Live ({len(t_fin_live)} bln)"
             for _, r_live in t_fin_live.iterrows():
                 b_name = str(r_live.get("Bulan", "")).strip()
                 if b_name in db['macro_monthly']['Bulan'].values and b_name != "Oktober":
@@ -618,10 +625,25 @@ def load_core_realtime_data(sync_token: int):
                     if v_real > 0: db['macro_monthly'].loc[db['macro_monthly']['Bulan'] == b_name, 'Realisasi Finance'] = v_real
                     if v_tgt > 0: db['macro_monthly'].loc[db['macro_monthly']['Bulan'] == b_name, 'Target Bulanan'] = v_tgt
                     if v_ads > 0: db['macro_monthly'].loc[db['macro_monthly']['Bulan'] == b_name, 'Budget Iklan'] = v_ads
-        else: sync_status["Data CS & Finance"] = "Live Connected"
-    else: sync_status["Data CS & Finance"] = "Baseline Aktif"
 
-    g_okt = fetched.get("okt", pd.DataFrame())
+        t_cs_live = extract_anchored_table(g_ov, "Nama CS", "Target Omset", stop_words=["Total", "Rata-rata"], max_rows=12)
+        if not t_cs_live.empty:
+            for _, r_c in t_cs_live.iterrows():
+                c_name = str(r_c.get("Nama CS", "")).strip()
+                if c_name in db['cs_overview']['Nama CS'].values:
+                    for m_col in ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September"]:
+                        if m_col in t_cs_live.columns:
+                            db['cs_overview'].loc[db['cs_overview']['Nama CS'] == c_name, m_col] = num_clean(r_c.get(m_col, 0))
+                    if "Total Omset" in t_cs_live.columns:
+                        db['cs_overview'].loc[db['cs_overview']['Nama CS'] == c_name, "Total Omset (Jan-Sep)"] = num_clean(r_c.get("Total Omset", 0))
+                    if "Total Closing" in t_cs_live.columns:
+                        db['cs_overview'].loc[db['cs_overview']['Nama CS'] == c_name, "Total Closing"] = int(num_clean(r_c.get("Total Closing", 0)))
+                    if "AOV (Rata-rata Donasi)" in t_cs_live.columns:
+                        db['cs_overview'].loc[db['cs_overview']['Nama CS'] == c_name, "AOV"] = int(num_clean(r_c.get("AOV (Rata-rata Donasi)", 0)))
+    else:
+        sync_status["Data Makro (Jan–Sep)"] = "Baseline Aktif"
+
+    # 2. PROSES OKTOBER REALTIME (DARI OKT_DASHBOARD_CS DI FIREBASE)
     if not g_okt.empty:
         mon_fin, df_kan_live = parse_monitoring_roas_finance(g_okt)
         if not df_kan_live.empty: db['okt_kanal_rasio'] = df_kan_live
@@ -663,8 +685,8 @@ def load_core_realtime_data(sync_token: int):
         t_har_2row = parse_rekap_harian_cs_2row(g_okt)
         if not t_har_2row.empty:
             db['okt_harian'] = t_har_2row
-            sync_status["Dashboard CS Oktober"] = f"Live ({len(t_har_2row[t_har_2row['Total_Gabungan'] > 0])} hari aktif)"
-        else: sync_status["Dashboard CS Oktober"] = "Live Synced"
+            sync_status["Dashboard CS Oktober"] = f"Firebase Live ({len(t_har_2row[t_har_2row['Total_Gabungan'] > 0])} hari)"
+        else: sync_status["Dashboard CS Oktober"] = "Firebase Live"
     else: sync_status["Dashboard CS Oktober"] = "Baseline 23 Okt"
 
     df_m = db['macro_monthly']
@@ -675,6 +697,7 @@ def load_core_realtime_data(sync_token: int):
     df_m['Selisih Finance vs CS'] = df_m['Realisasi Finance'] - df_m['Omset CS']
     df_m['% Capaian'] = np.where(df_m['Target Bulanan'] > 0, (df_m['Realisasi Finance'] / df_m['Target Bulanan'] * 100).round(1), 0.0)
 
+    # 3. PROSES LEADS & CR HARIAN DARI FIREBASE
     leads_rows_default = [
         ("Nisa", "2026-10-01", 54, 4, 44, 6052000, 54, 44, 6052000, 0, 0, 0, 0, 0, 0, 0),
         ("Nisa", "2026-10-02", 59, 14, 55, 7606000, 53, 50, 7110000, 0, 0, 0, 6, 5, 496000, 0),
@@ -712,12 +735,11 @@ def load_core_realtime_data(sync_token: int):
     ]
 
     live_leads_all = []
-    for tag_l, cs_lbl in [("l_nisa", "Nisa"), ("l_salma", "Salma"), ("l_aulia", "Aulia")]:
-        g_l = fetched.get(tag_l, pd.DataFrame())
+    for g_l, cs_lbl in [(g_l_nisa, "Nisa"), (g_l_salma, "Salma"), (g_l_aulia, "Aulia")]:
         if not g_l.empty: live_leads_all.extend(parse_live_leads_tab(g_l, cs_lbl))
 
     if len(live_leads_all) >= 5:
-        sync_status["Leads & CR Harian"] = f"Live ({len(live_leads_all)} baris)"
+        sync_status["Leads & CR Harian"] = f"Firebase Live ({len(live_leads_all)} baris)"
         leads_source = live_leads_all
     else:
         sync_status["Leads & CR Harian"] = "Baseline Aktif"
@@ -741,24 +763,27 @@ def load_core_realtime_data(sync_token: int):
     df_har['CR_Harian_Pct'] = df_har['Tanggal'].map(lambda d: cr_map_all.get(str(d).strip(), np.nan))
     db['okt_harian'] = df_har
 
-    g_stok = fetched.get("stok", pd.DataFrame())
+    # 4. PROSES STOK MUSHAF & PACKING DARI FIREBASE
     if not g_stok.empty:
         parsed_s = parse_stok_dashboard_new(g_stok)
-        if "rincian_inventaris" in parsed_s:
-            db['stok_rincian_baru'] = parsed_s["rincian_inventaris"]
-            sync_status["Stok Mushaf Real-Time"] = "Live Synced"
-        if "analisis_defisit" in parsed_s:
-            db['stok_defisit_baru'] = parsed_s["analisis_defisit"]
-            sync_status["Stok Mushaf Real-Time"] = "Live Synced"
-        if "Stok Mushaf Real-Time" not in sync_status:
-            sync_status["Stok Mushaf Real-Time"] = "Live Connected"
+        if "rincian_inventaris" in parsed_s: db['stok_rincian_baru'] = parsed_s["rincian_inventaris"]
+        if "analisis_defisit" in parsed_s: db['stok_defisit_baru'] = parsed_s["analisis_defisit"]
+        sync_status["Stok Mushaf Real-Time"] = "Firebase Live"
     else:
         sync_status["Stok Mushaf Real-Time"] = "Baseline Baru (702 Defisit)"
+
+    if not g_pack.empty:
+        t_pk = extract_anchored_table(g_pack, "Bulan", "Total Mushaf", max_rows=15)
+        if not t_pk.empty and "Total Mushaf Terverifikasi" in t_pk.columns:
+            for cn in ["Total Mushaf Terverifikasi", "Verifikasi (Belum Stiker)", "Penamaan Mushaf (Stiker)", "Packing / Proses Distribusi", "Distribusi Selesai"]:
+                if cn in t_pk.columns: t_pk[cn] = t_pk[cn].apply(lambda x: int(num_clean(x)))
+            db['packing_dus_bulanan'] = t_pk
 
     for cn in ["Siap Salur (Stiker)", "Belum Siap (Proses)", "Total Stok Fisik"]:
         if cn not in db['stok_rincian_baru'].columns: db['stok_rincian_baru'][cn] = 0
         else: db['stok_rincian_baru'][cn] = db['stok_rincian_baru'][cn].apply(lambda x: int(num_clean(x)))
 
+    # 5. PROSES KALENDER DISTRIBUSI DARI FIREBASE
     db['kalender_okt'] = pd.DataFrame([
         {"No": 1, "Tanggal Agenda": "2026-10-20", "ID Proyek": "AQ-2026-087", "Nama Lembaga Penerima": "MDU AL-ITTIHAD CIHERANG CIPELAH",    "Nama PIC": "Abdul Karim",             "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Rancabali, Kab. Bandung",          "Jumlah Mushaf (Pcs)": 108, "Variasi Mushaf": "Super Tajwid",    "Status": "Scheduled"},
         {"No": 2, "Tanggal Agenda": "2026-10-22", "ID Proyek": "AQ-2026-074", "Nama Lembaga Penerima": "TPA Al Hijrah",                      "Nama PIC": "Arip Rohman",             "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Sidomulyo, Kab. Lampung Selatan",  "Jumlah Mushaf (Pcs)": 45,  "Variasi Mushaf": "Super Tajwid",    "Status": "Scheduled"},
@@ -770,7 +795,6 @@ def load_core_realtime_data(sync_token: int):
         {"No": 8, "Tanggal Agenda": "2026-10-29", "ID Proyek": "AQ-2026-072", "Nama Lembaga Penerima": "TPQ Tarbiyatul Aulad",               "Nama PIC": "Ust. Fandy Abdillah",     "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Sukanagara, Kab. Cianjur",         "Jumlah Mushaf (Pcs)": 70,  "Variasi Mushaf": "Al Wakaf Tiktok", "Status": "Scheduled"},
         {"No": 9, "Tanggal Agenda": "2026-10-31", "ID Proyek": "AQ-2026-104", "Nama Lembaga Penerima": "MDTA Darul Jannah",                  "Nama PIC": "Ai Neni",                 "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Jawa Barat",                       "Jumlah Mushaf (Pcs)": 100, "Variasi Mushaf": "Al Wakaf Tiktok", "Status": "Scheduled"},
     ])
-    g_kal = fetched.get("kal", pd.DataFrame())
     if not g_kal.empty:
         t_kal = extract_anchored_table(g_kal, "No", "Tanggal Agenda", stop_words=["TOTAL"], max_rows=45)
         if not t_kal.empty and "Nama Lembaga Penerima" in t_kal.columns:
@@ -781,17 +805,17 @@ def load_core_realtime_data(sync_token: int):
             t_kal_aj = t_kal_aj[t_kal_aj["Nama Lembaga Penerima"].astype(str).str.strip() != ""]
             if not t_kal_aj.empty:
                 db['kalender_okt'] = t_kal_aj
-                sync_status["Kalender Distribusi"] = f"Live ({len(t_kal_aj)} titik)"
+                sync_status["Kalender Distribusi"] = f"Firebase Live ({len(t_kal_aj)} titik)"
     if "Kalender Distribusi" not in sync_status:
         sync_status["Kalender Distribusi"] = "Live (9 titik)"
 
-    g_db_set = fetched.get("db_set", pd.DataFrame())
+    # 6. PROSES DATABASE CRM DARI FIREBASE
     if not g_db_set.empty:
         parsed_db_s = parse_setting_dashboard_crm(g_db_set)
         if "segmentasi" in parsed_db_s: db['db_segmentasi'] = parsed_db_s["segmentasi"]
         if "reminder" in parsed_db_s: db['db_reminder'] = parsed_db_s["reminder"]
         if "status_donatur" in parsed_db_s: db['db_status_donatur'] = parsed_db_s["status_donatur"]
-        sync_status["Master Database CRM"] = "Live Synced"
+        sync_status["Master Database CRM"] = "Firebase Live"
     else:
         sync_status["Master Database CRM"] = "Baseline Aktif"
 
@@ -824,21 +848,8 @@ def load_core_realtime_data(sync_token: int):
         "bt_siap": bt_siap, "bt_belum": bt_belum, "bt_total": bt_tot, "bt_jadwal": 200, "bt_gap_siap": bt_siap - 200
     }
 
-    db['packing_dus_bulanan'] = pd.DataFrame([
-        {"Bulan": "Januari",   "Total Mushaf Terverifikasi": 2356, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2356},
-        {"Bulan": "Februari",  "Total Mushaf Terverifikasi": 1906, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1906},
-        {"Bulan": "Maret",     "Total Mushaf Terverifikasi": 3814, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3814},
-        {"Bulan": "April",     "Total Mushaf Terverifikasi": 2225, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2225},
-        {"Bulan": "Mei",       "Total Mushaf Terverifikasi": 1454, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1454},
-        {"Bulan": "Juni",      "Total Mushaf Terverifikasi": 4103, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 4103},
-        {"Bulan": "Juli",      "Total Mushaf Terverifikasi": 3586, "Verifikasi (Belum Stiker)": 1,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3585},
-        {"Bulan": "Agustus",   "Total Mushaf Terverifikasi": 2852, "Verifikasi (Belum Stiker)": 12,   "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 2840, "Distribusi Selesai": 0},
-        {"Bulan": "September", "Total Mushaf Terverifikasi": 2599, "Verifikasi (Belum Stiker)": 1972, "Penamaan Mushaf (Stiker)": 447, "Packing / Proses Distribusi": 180,  "Distribusi Selesai": 0},
-        {"Bulan": "Oktober",   "Total Mushaf Terverifikasi": 946,  "Verifikasi (Belum Stiker)": 846,  "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 100},
-    ])
-
     db['sync_status'] = sync_status
-    db['last_sync'] = now_wib().strftime("%d %b %Y • %H:%M:%S WIB")
+    db['last_sync'] = fb_time_str if fb_time_str else now_wib().strftime("%d %b %Y • %H:%M:%S WIB")
     return db
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -897,14 +908,13 @@ def load_lazy_contacts_db(sync_token: int):
     ])
     return sample, True
 
-# Token otomatis berganti tiap 60 detik atau langsung berganti saat tombol Sync diklik
-current_sync_token = int(time.time() // 60) + (st.session_state.sync_nonce * 100000)
+current_sync_token = int(time.time() // 30) + (st.session_state.sync_nonce * 100000)
 db = load_core_realtime_data(current_sync_token)
 df_macro = db['macro_monthly']
 sa = db['stok_audit']
 
 # ==============================================================================
-# 7. SIDEBAR NAVIGASI & TOMBOL INSTANT FORCE-SYNC
+# 7. SIDEBAR NAVIGASI & STATUS FIREBASE
 # ==============================================================================
 with st.sidebar:
     render_html(f"""
@@ -920,6 +930,8 @@ with st.sidebar:
     </div>
     """)
     menu_pilihan = st.radio("Navigasi Utama", allowed_menus, label_visibility="collapsed")
+    fb_lbl = "● Firebase Realtime Aktif" if db.get("firebase_connected") else "● Mode Cadangan (Run Apps Script)"
+    fb_col = "#10B981" if db.get("firebase_connected") else "#F59E0B"
     render_html(f"""
     <div class="sub-box" style="margin-top:20px;padding:13px 14px;border-radius:14px;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
@@ -928,12 +940,12 @@ with st.sidebar:
         </div>
         <div style="font-size:11px;color:var(--text-secondary)!important;line-height:1.45;">
             {current_user['title']}<br>
-            <span style="color:#10B981!important;font-weight:700;">● No-Cache Auto-Sync (60s)</span><br>
-            <span style="font-size:10.5px;color:var(--text-muted)!important;">WIB: {db['last_sync']}</span>
+            <span style="color:{fb_col}!important;font-weight:700;">{fb_lbl}</span><br>
+            <span style="font-size:10.5px;color:var(--text-muted)!important;">Update: {db['last_sync']}</span>
         </div>
     </div>
     """)
-    with st.expander("📡 Detail Koneksi Sheet"):
+    with st.expander("📡 Detail Koneksi Modul"):
         for mod_name, stat_txt in db.get("sync_status", {}).items():
             st.caption(f"🟢 **{mod_name}**: {stat_txt}")
     sb_col1, sb_col2 = st.columns(2)
@@ -950,7 +962,7 @@ with st.sidebar:
             st.rerun()
 
 # ==============================================================================
-# 8. UI HELPER COMPONENTS
+# 8. UI HELPER COMPONENTS (ANTI-OVERFLOW)
 # ==============================================================================
 def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_theme="green", subtext=""):
     ib_map = {"indigo": "ib-indigo", "orange": "ib-orange", "emerald": "ib-emerald", "rose": "ib-rose"}
@@ -959,13 +971,13 @@ def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_them
     render_html(f"""
     <div class="bento-card kpi-uniform">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <span style="font-size:12.5px;font-weight:600;color:var(--text-secondary)!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{title}</span>
+            <span style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;line-height:1.25;">{title}</span>
             <div class="icon-box {ib_map.get(color_theme, 'ib-indigo')}"><i class="{icon_cls}"></i></div>
         </div>
-        <div class="metric-num" style="font-size:24px;font-weight:800;letter-spacing:-0.5px;white-space:nowrap;">{value}</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:nowrap;">
+        <div class="kpi-val-fluid">{value}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
             <span class="badge-pill {bp_map.get(badge_theme, 'bp-green')}"><i class="{arrow_ic}"></i> {badge_text}</span>
-            <span style="font-size:11px;color:var(--text-muted)!important;font-weight:600;white-space:nowrap;">{subtext}</span>
+            <span style="font-size:10.5px;color:var(--text-muted)!important;font-weight:600;">{subtext}</span>
         </div>
     </div>
     """)
@@ -974,7 +986,7 @@ def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
     badge_html = f'<span class="badge-pill {bp_map.get(badge_theme, "bp-indigo")}">{badge_text}</span>' if badge_text else ""
     sub_html = f'<div style="font-size:11.5px;color:var(--text-muted)!important;margin-top:2px;">{subtitle_text}</div>' if subtitle_text else ""
-    render_html(f'<div class="chart-header-box"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;"><div style="min-width:0;"><div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;color:var(--text-primary)!important;">{title_text}</div>{sub_html}</div>{badge_html}</div></div>')
+    render_html(f'<div class="chart-header-box"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;"><div style="min-width:0;"><div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;color:var(--text-primary)!important;">{title_text}</div>{sub_html}</div>{badge_html}</div></div>')
 
 def apply_saas_plotly(fig, height=320, is_currency=False):
     bg_col = "#111827" if is_dark else "#FFFFFF"
@@ -1100,7 +1112,7 @@ with hdr_col_left:
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span class="badge-pill bp-indigo"><i class="ri-user-star-line"></i> {current_user['username_display']} ({user_role})</span>
-            <span class="badge-pill bp-green"><i class="ri-flashlight-fill" style="font-size:11px;"></i> {db['last_sync']}</span>
+            <span class="badge-pill bp-green"><i class="ri-database-2-fill" style="font-size:11px;"></i> {db['last_sync']}</span>
         </div>
     </div>
     """)
@@ -1141,13 +1153,13 @@ if menu_pilihan == "Dashboard Overview":
         render_html(f"""
         <div class="hero-card">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span style="font-size:11px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">SATPAM KEUANGAN (ROAS & ROFI)</span>
-                <i class="ri-shield-star-line" style="font-size:18px;"></i>
+                <span style="font-size:11px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;">SATPAM KEUANGAN (ROAS & ROFI)</span>
+                <i class="ri-shield-star-line" style="font-size:17px;"></i>
             </div>
-            <div class="metric-num" style="font-size:21.5px;font-weight:800;white-space:nowrap;letter-spacing:-0.4px;">
+            <div class="kpi-val-fluid">
                 ROAS {roas_okt_val:.2f}x <span style="opacity:0.65;font-weight:500;">|</span> ROFI {rofi_okt_val:.2f}x
             </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.16);padding:6px 10px;border-radius:10px;font-size:11px;font-weight:600;gap:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.16);padding:5px 10px;border-radius:10px;font-size:10.5px;font-weight:600;gap:6px;flex-wrap:wrap;">
                 <span class="nowrap-val">Ads: {rp_short(ads_okt)}</span>
                 <span class="nowrap-val">DSD: {rp_short(satpam_okt['dsd'])}</span>
             </div>
@@ -1168,14 +1180,14 @@ if menu_pilihan == "Dashboard Overview":
 
     with m_right:
         if user_role == "Advertiser":
-            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12px;font-weight:700;"><i class="ri-advertisement-line" style="color:#10B981!important;"></i> Rasio ROAS & ROFI (Okt)</span><span class="badge-pill bp-green">Avg CR {db["avg_cr_okt"]:.1f}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Leads Meta (83,9%)</span><span class="nowrap-val" style="color:#10B981!important;">{rp(leads_meta_okt)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">ROAS Meta / ROFI Real</span><span class="nowrap-val">{roas_okt_val:.2f}x / {rofi_okt_val:.2f}x</span></div></div>'
+            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12px;font-weight:700;"><i class="ri-advertisement-line" style="color:#10B981!important;"></i> Rasio ROAS & ROFI (Okt)</span><span class="badge-pill bp-green">Avg CR {db["avg_cr_okt"]:.1f}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Leads Meta (83,9%)</span><span class="nowrap-val" style="color:#10B981!important;">{rp(leads_meta_okt)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">ROAS Meta / ROFI Real</span><span class="nowrap-val">{roas_okt_val:.2f}x / {rofi_okt_val:.2f}x</span></div></div>'
         else:
-            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12px;font-weight:700;"><i class="ri-alarm-warning-line" style="color:#EF4444!important;"></i> Status Inventaris & Defisit (Agust–Okt)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Mushaf</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Kebutuhan 3 Bln vs Stok Mushaf</span><span class="nowrap-val">{sa["kebutuhan_agust_okt"]:,} vs {sa["stok_fisik_mushaf_tersedia"]:,} Pcs</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">Total Inventaris Fisik (Semua)</span><span class="nowrap-val" style="color:#10B981!important;">{sa["total_inventaris_fisik"]:,} Pcs (Siap: {sa["total_inventaris_siap"]:,})</span></div></div>'
+            bottom_box_html = f'<div class="sub-box" style="border-radius:12px;padding:11px 14px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12px;font-weight:700;"><i class="ri-alarm-warning-line" style="color:#EF4444!important;"></i> Status Inventaris & Defisit (Agust–Okt)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Mushaf</span></div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text-secondary)!important;">Kebutuhan 3 Bln vs Stok Mushaf</span><span class="nowrap-val">{sa["kebutuhan_agust_okt"]:,} vs {sa["stok_fisik_mushaf_tersedia"]:,} Pcs</span></div><div style="display:flex;justify-content:space-between;font-size:12px;"><span style="color:var(--text-secondary)!important;">Total Inventaris Fisik (Semua)</span><span class="nowrap-val" style="color:#10B981!important;">{sa["total_inventaris_fisik"]:,} Pcs (Siap: {sa["total_inventaris_siap"]:,})</span></div></div>'
 
         render_html(f"""
         <div class="bento-card" style="min-height:392px;display:flex;flex-direction:column;justify-content:space-between;">
             <div>
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
                     <div style="display:flex;align-items:center;gap:8px;">
                         <div class="icon-box ib-indigo" style="width:32px;height:32px;font-size:15px;"><i class="ri-scales-3-line"></i></div>
                         <span style="font-family:'Outfit',sans-serif!important;font-weight:700;font-size:15px;">Monitoring ROAS, ROFI & Proyeksi</span>
@@ -1194,7 +1206,7 @@ if menu_pilihan == "Dashboard Overview":
                     </div>
                 </div>
                 <div class="sub-box" style="border-radius:12px;padding:11px 14px;margin-bottom:10px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;">
                         <span style="font-size:12px;font-weight:700;"><i class="ri-compass-3-line" style="color:#F59E0B!important;"></i> Proyeksi Akhir Bulan (31 Okt)</span>
                         <span class="badge-pill bp-orange">{(proyeksi_akhir_bulan_real/target_okt)*100:.1f}% Target</span>
                     </div>
@@ -1215,13 +1227,13 @@ if menu_pilihan == "Dashboard Overview":
 
     b1, b2, b3 = st.columns(3)
     if user_role == "Advertiser":
-        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Perolehan CS Aktif (Oktober)</span><span class="badge-pill bp-indigo">1.344 Transaksi</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(cs_okt_total)}</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:64%;background:#FF6B4A;border-radius:99px;"></div><div style="width:29%;background:#4F46E5;border-radius:99px;"></div><div style="width:7%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Nisa: <b>Rp 122,7 Jt</b></span><span>Salma: <b>Rp 57,0 Jt</b></span><span>Aulia: <b>Rp 13,0 Jt</b></span></div></div>')
-        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Sumber Kontak Donasi (Oktober)</span><span class="badge-pill bp-green">83,9% Meta Ads</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(leads_meta_okt)} Leads Meta</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:84%;background:#10B981;border-radius:99px;"></div><div style="width:13%;background:#4F46E5;border-radius:99px;"></div><div style="width:3%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Meta: <b>83,9%</b></span><span>CRM Total: <b>Rp 30,9 Jt (12,5%)</b></span><span>Lainnya: <b>3,6%</b></span></div></div>')
-        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">ROAS vs ROFI Belanja Iklan (Okt)</span><span class="badge-pill bp-orange">ROAS {roas_okt_val:.2f}x | ROFI {rofi_okt_val:.2f}x</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{rp_short(ads_okt)} Ad Spend</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:70%;background:#4F46E5;border-radius:99px;"></div><div style="width:30%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>ROAS Akuisisi Meta: <b>{roas_okt_val:.2f}x</b></span><span>ROFI Real/CS: <b>{rofi_okt_val:.2f}x</b></span></div></div>')
+        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Perolehan CS Aktif (Oktober)</span><span class="badge-pill bp-indigo">1.344 Transaksi</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">{rp_short(cs_okt_total)}</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:64%;background:#FF6B4A;border-radius:99px;"></div><div style="width:29%;background:#4F46E5;border-radius:99px;"></div><div style="width:7%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Nisa: <b>Rp 122,7 Jt</b></span><span>Salma: <b>Rp 57,0 Jt</b></span><span>Aulia: <b>Rp 13,0 Jt</b></span></div></div>')
+        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Sumber Kontak Donasi (Oktober)</span><span class="badge-pill bp-green">83,9% Meta Ads</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">{rp_short(leads_meta_okt)} Leads Meta</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:84%;background:#10B981;border-radius:99px;"></div><div style="width:13%;background:#4F46E5;border-radius:99px;"></div><div style="width:3%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Meta: <b>83,9%</b></span><span>CRM Total: <b>Rp 30,9 Jt (12,5%)</b></span><span>Lainnya: <b>3,6%</b></span></div></div>')
+        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">ROAS vs ROFI Belanja Iklan (Okt)</span><span class="badge-pill bp-orange">ROAS {roas_okt_val:.2f}x | ROFI {rofi_okt_val:.2f}x</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">{rp_short(ads_okt)} Ad Spend</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:70%;background:#4F46E5;border-radius:99px;"></div><div style="width:30%;background:#10B981;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>ROAS Akuisisi Meta: <b>{roas_okt_val:.2f}x</b></span><span>ROFI Real/CS: <b>{rofi_okt_val:.2f}x</b></span></div></div>')
     else:
-        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Total Mushaf Meta LP & TikTok</span><span class="badge-pill bp-indigo">3.447 Pcs Fisik</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{sa["st_siap"]} ST • {sa["mushaf_siap_akumulasi"]} AW Siap</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:32%;background:#10B981;border-radius:99px;"></div><div style="width:68%;background:#F97316;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Meta LP: <b>{sa["meta_lp_total"]:,}</b></span><span>TikTok: <b>{sa["tiktok_mushaf_total"]}</b></span><span>Proses/PO: <b>2.328</b></span></div></div>')
-        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Defisit Mushaf (Agustus – Oktober)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Pcs</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">Kebutuhan {sa["kebutuhan_agust_okt"]:,} Pcs</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:83%;background:#6366F1;border-radius:99px;"></div><div style="width:17%;background:#EF4444;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Stok Fisik: <b>{sa["stok_fisik_mushaf_tersedia"]:,}</b></span><span>Kurang: <b>({sa["defisit_agust_okt"]}) Pcs</b></span></div></div>')
-        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><span style="font-size:12.5px;font-weight:700;">Buku Belajar Super Tahsin</span><span class="badge-pill bp-green">Aman ({sa["bt_total"]:,} Pcs)</span></div><div class="metric-num" style="font-size:22px;font-weight:800;margin-bottom:8px;">{sa["bt_siap"]:,} Siap • {sa["bt_belum"]:,} Proses</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:48%;background:#10B981;border-radius:99px;"></div><div style="width:52%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;"><span>Sudah Stiker: <b>{sa["bt_siap"]:,}</b></span><span>Belum Siap: <b>{sa["bt_belum"]:,}</b></span></div></div>')
+        with b1: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Total Mushaf Meta LP & TikTok</span><span class="badge-pill bp-indigo">3.447 Pcs Fisik</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">{sa["st_siap"]} ST • {sa["mushaf_siap_akumulasi"]} AW Siap</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:32%;background:#10B981;border-radius:99px;"></div><div style="width:68%;background:#F97316;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Meta LP: <b>{sa["meta_lp_total"]:,}</b></span><span>TikTok: <b>{sa["tiktok_mushaf_total"]}</b></span><span>Proses/PO: <b>2.328</b></span></div></div>')
+        with b2: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Defisit Mushaf (Agustus – Oktober)</span><span class="badge-pill bp-red">Wajib Beli {sa["defisit_agust_okt"]} Pcs</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">Kebutuhan {sa["kebutuhan_agust_okt"]:,} Pcs</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:83%;background:#6366F1;border-radius:99px;"></div><div style="width:17%;background:#EF4444;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Stok Fisik: <b>{sa["stok_fisik_mushaf_tersedia"]:,}</b></span><span>Kurang: <b>({sa["defisit_agust_okt"]}) Pcs</b></span></div></div>')
+        with b3: render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Buku Belajar Super Tahsin</span><span class="badge-pill bp-green">Aman ({sa["bt_total"]:,} Pcs)</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">{sa["bt_siap"]:,} Siap • {sa["bt_belum"]:,} Proses</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:48%;background:#10B981;border-radius:99px;"></div><div style="width:52%;background:#F59E0B;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Sudah Stiker: <b>{sa["bt_siap"]:,}</b></span><span>Belum Siap: <b>{sa["bt_belum"]:,}</b></span></div></div>')
 
 # ==============================================================================
 # HALAMAN 2: DONASI & SATPAM KEUANGAN (MENAMPILKAN ROAS & ROFI)
@@ -1248,7 +1260,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
             bln_terpilih = "Oktober"
         else:
             bln_terpilih, tgl_range_t1 = "Oktober", (datetime.date(2026, 10, 1), max_dt_okt)
-            st.selectbox("2. Status Data:", ["Tersinkronisasi Otomatis (Sheet Dashboard CS)"], disabled=True, key="fin_stat_info")
+            st.selectbox("2. Status Data:", ["Tersinkronisasi Otomatis (Firebase Realtime)"], disabled=True, key="fin_stat_info")
 
     with f1_c:
         if "Oktober" in cakupan_fin:
@@ -1338,7 +1350,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
         render_html(f"""
         <div class="bento-card" style="min-height:382px;display:flex;flex-direction:column;justify-content:space-between;">
             <div>
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
                     <span style="font-family:'Outfit',sans-serif!important;font-weight:700;font-size:15px;"><i class="ri-calculator-line" style="color:#6366F1!important;"></i> Satpam Keuangan (ROAS & ROFI)</span>
                     <span class="badge-pill bp-{sk['badge_type']}">{lbl_badge}</span>
                 </div>
@@ -1402,7 +1414,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
             render_saas_table(dfc[m_d], max_rows=30)
 
 # ==============================================================================
-# HALAMAN 3: PERFORMA CS & LEADS (BEBAS ERROR DATE_INPUT)
+# HALAMAN 3: PERFORMA CS & LEADS
 # ==============================================================================
 elif menu_pilihan == "Performa CS & Leads":
     mode_evaluasi_cs = st.radio(
@@ -1506,7 +1518,7 @@ elif menu_pilihan == "Performa CS & Leads":
         render_saas_table(df_ov_disp)
 
 # ==============================================================================
-# HALAMAN 4: LOGISTIK & GUDANG (BEBAS KEYERROR & SESUAI DASHBOARD STOK BARU)
+# HALAMAN 4: LOGISTIK & GUDANG
 # ==============================================================================
 elif menu_pilihan == "Logistik & Gudang":
     s1, s2, s3 = st.columns(3)
@@ -1621,7 +1633,7 @@ elif menu_pilihan == "Kalender Distribusi":
     render_saas_table(df_kal_disp[cols_aj_display])
 
 # ==============================================================================
-# HALAMAN 6: DATABASE & SMART WA BLAST ENGINE (FULL REALTIME DARI SPREADSHEET)
+# HALAMAN 6: DATABASE & SMART WA BLAST ENGINE
 # ==============================================================================
 elif menu_pilihan == "Database & WA Blast":
     df_all_c, is_sample_db = load_lazy_contacts_db(current_sync_token)
@@ -1686,7 +1698,7 @@ elif menu_pilihan == "Database & WA Blast":
         else:
             jml_label = f"{len(df_out):,} Kontak".replace(",", ".")
 
-        render_html(f'<div class="bento-card" style="border:1.5px dashed #FB923C;text-align:center;padding:18px;"><div style="font-size:11px;font-weight:700;color:#F97316!important;letter-spacing:0.6px;">TARGET AUDIENS TERPILIH</div><div class="metric-num" style="font-size:26px;font-weight:800;margin:6px 0;">{jml_label}</div><div style="font-size:11.5px;color:var(--text-secondary)!important;">Format: <b>phone number</b>, <b>nama</b></div></div>')
+        render_html(f'<div class="bento-card" style="border:1.5px dashed #FB923C;text-align:center;padding:18px;"><div style="font-size:11px;font-weight:700;color:#F97316!important;letter-spacing:0.6px;">TARGET AUDIENS TERPILIH</div><div class="kpi-val-fluid" style="margin:6px 0;">{jml_label}</div><div style="font-size:11.5px;color:var(--text-secondary)!important;">Format: <b>phone number</b>, <b>nama</b></div></div>')
         st.download_button(label="Download CSV 2 Kolom (WA Blast)", data=df_out.to_csv(index=False).encode('utf-8'), file_name=f"WA_Blast_AmalQu_{now_wib().strftime('%Y%m%d')}.csv", mime="text/csv", use_container_width=True)
 
     sub_t5 = st.radio(
