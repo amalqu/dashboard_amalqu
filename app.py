@@ -27,6 +27,7 @@ def now_wib():
 if "dark_mode" not in st.session_state: st.session_state.dark_mode = True
 if "auth_user" not in st.session_state: st.session_state.auth_user = None
 if "sync_nonce" not in st.session_state: st.session_state.sync_nonce = 0
+if "ambil_cb_nominal" not in st.session_state: st.session_state.ambil_cb_nominal = 5000000
 
 def render_html(raw_html: str):
     st.markdown(" ".join(line.strip() for line in raw_html.splitlines() if line.strip()), unsafe_allow_html=True)
@@ -446,7 +447,6 @@ def parse_monitoring_roas_finance(grid_okt):
     return res, (pd.DataFrame(kanal_rows) if kanal_rows else pd.DataFrame())
 
 def parse_stok_dashboard_new(grid_ms):
-    """Pemindai Anti-Merge untuk DASHBOARD MONITORING STOK REAL-TIME (Kolom A-E & Kolom F-M yang di-merge)."""
     out = {}
     if grid_ms is None or grid_ms.empty: return out
     nrows, ncols = grid_ms.shape
@@ -477,7 +477,6 @@ def parse_stok_dashboard_new(grid_ms):
     return out
 
 def parse_data_spend_oktober(grid_sp):
-    """Membaca sheet DATA SPEND OKTOBER (9 KPI atas & Tabel Harian)."""
     kpi_sp = {
         "total_spending": 0.0, "total_leads": 0, "avg_cpr": 0.0,
         "leads_closing": 1298, "nominal_closing": 205624456.0, "total_roas": 0.0,
@@ -684,7 +683,6 @@ def load_core_realtime_data(sync_token: int):
         } for r in harian_rows_base
     ])
 
-    # Baseline Sheet DATA SPEND OKTOBER (Sesuai Screenshot 28 Okt 2026)
     db['spend_okt_kpi'] = {
         "total_spending": 0.0, "total_leads": 0, "avg_cpr": 0.0,
         "leads_closing": 1298, "nominal_closing": 205624456.0, "total_roas": 0.0,
@@ -768,7 +766,6 @@ def load_core_realtime_data(sync_token: int):
     g_kal = grid_to_df(fb_data.get("kalender_okt", []))
     g_db_set = grid_to_df(fb_data.get("db_setting", []))
 
-    # 1. PROSES JAN-SEP
     if not g_ov.empty:
         t_fin_live = extract_anchored_table(g_ov, "Bulan", "Target Bulanan", stop_words=["Total Target", "Sisa Target"], max_rows=15)
         if not t_fin_live.empty:
@@ -791,7 +788,6 @@ def load_core_realtime_data(sync_token: int):
                             db['cs_overview'].loc[db['cs_overview']['Nama CS'] == c_name, m_col] = num_clean(r_c.get(m_col, 0))
     else: sync_status["Data Makro (Jan–Sep)"] = "Baseline Aktif"
 
-    # 2. PROSES OKTOBER REALTIME
     if not g_okt.empty:
         mon_fin, df_kan_live = parse_monitoring_roas_finance(g_okt)
         if not df_kan_live.empty: db['okt_kanal_rasio'] = df_kan_live
@@ -837,7 +833,6 @@ def load_core_realtime_data(sync_token: int):
         else: sync_status["Dashboard CS Oktober"] = "Firebase Live"
     else: sync_status["Dashboard CS Oktober"] = "Baseline Aktif"
 
-    # 3. PROSES SHEET DATA SPEND OKTOBER (FIREBASE ATAU DIRECT FALLBACK)
     if g_spend.empty:
         g_spend = fetch_direct_sheet("leads_cs", "DATA SPEND OKTOBER")
     if not g_spend.empty:
@@ -849,7 +844,6 @@ def load_core_realtime_data(sync_token: int):
         else: sync_status["Data Spend Oktober"] = "Live Connected"
     else: sync_status["Data Spend Oktober"] = "Baseline 28 Okt"
 
-    # 4. PROSES LEADS & CR HARIAN
     live_leads_all = []
     for g_l, cs_lbl in [(g_l_nisa, "Nisa"), (g_l_salma, "Salma"), (g_l_aulia, "Aulia")]:
         if not g_l.empty: live_leads_all.extend(parse_live_leads_tab(g_l, cs_lbl))
@@ -884,7 +878,6 @@ def load_core_realtime_data(sync_token: int):
     df_har['CR_Harian_Pct'] = df_har['Tanggal'].map(lambda d: cr_map_all.get(str(d).strip(), np.nan))
     db['okt_harian'] = df_har
 
-    # 5. PROSES STOK MUSHAF (MERGE-SAFE)
     if not g_stok.empty:
         parsed_s = parse_stok_dashboard_new(g_stok)
         if "rincian_inventaris" in parsed_s: db['stok_rincian_baru'] = parsed_s["rincian_inventaris"]
@@ -896,7 +889,6 @@ def load_core_realtime_data(sync_token: int):
         if cn not in db['stok_rincian_baru'].columns: db['stok_rincian_baru'][cn] = 0
         else: db['stok_rincian_baru'][cn] = db['stok_rincian_baru'][cn].apply(lambda x: int(num_clean(x)))
 
-    # 6. PROSES KALENDER DISTRIBUSI OKTOBER
     db['kalender_okt'] = pd.DataFrame([
         {"No": 1,  "Tanggal Agenda": "2026-10-15", "ID Proyek": "AQ-2026-081", "Nama Lembaga Penerima": "Penyaluran Jatikramat Bekasi",       "Nama PIC": "PIC Lembaga",             "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Jatikramat, Kec. Jatiasih, Kota Bekasi", "Jumlah Mushaf (Pcs)": 5,   "Variasi Mushaf": "Al Wakaf Tiktok", "Status": "[Success]"},
         {"No": 2,  "Tanggal Agenda": "2026-10-16", "ID Proyek": "AQ-2026-082", "Nama Lembaga Penerima": "Muhammadiyah Wil Jabar",             "Nama PIC": "PIC Muhammadiyah",        "Kontak WA": "Terdaftar", "Wilayah / Titik Lokasi": "Muhammadiyah Wil Jabar",                 "Jumlah Mushaf (Pcs)": 200, "Variasi Mushaf": "Super Tajwid",    "Status": "[Success]"},
@@ -938,7 +930,6 @@ def load_core_realtime_data(sync_token: int):
         sync_status["Master Database CRM"] = "Firebase Live"
     else: sync_status["Master Database CRM"] = "Baseline Aktif"
 
-    # KALKULASI RINGKASAN AUDIT STOK PRESISI DARI TABEL KIRI & KANAN
     df_inv = db['stok_rincian_baru']
     df_def = db['stok_defisit_baru']
     df_kal = db['kalender_okt']
@@ -1139,7 +1130,6 @@ def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_them
     """)
 
 def render_lima_langkah_satpam_card(sm_dict, title_box="Satpam Keuangan: 5 Langkah Dana Mushaf & Cashback"):
-    """Menampilkan 5 poin utama Satpam Keuangan dengan bahasa yang sangat jelas dan mudah dipahami."""
     col_sisa_cb = "#10B981" if sm_dict['sisa_cb_setelah_diambil'] >= 0 else "#EF4444"
     render_html(f"""
     <div class="bento-card" style="min-height:395px;display:flex;flex-direction:column;justify-content:space-between;">
@@ -1347,7 +1337,7 @@ if menu_pilihan == "Dashboard Overview":
     leads_meta_okt = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 205624456.0
     sm_ov = hitung_lima_langkah_satpam(
         real_okt, ads_okt, sa, hpp_unit=20000.0, leads_meta_val=leads_meta_okt,
-        mode_dana="kas_real", mode_mushaf="defisit_3bln", rencana_ambil_cb=st.session_state.ambil_cb_nominal
+        mode_dana="kas_real", mode_mushaf="defisit_3bln", rencana_ambil_cb=st.session_state.get("ambil_cb_nominal", 5000000)
     )
     roas_okt_val = float(fm.get('roas_akuisisi', sm_ov['roas_meta']))
     rofi_okt_val = float(fm.get('rofi_real', sm_ov['rofi_real']))
@@ -1412,7 +1402,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
         opsi_hpp = st.selectbox("3. Harga HPP Beli per Mushaf:", ["Tier 1: Rp 20.000 / Mushaf", "Tier 2: Rp 26.000 / Mushaf", "Tier 3: Rp 33.500 / Mushaf"], key="fin_hpp_sel")
         hpp_terpilih = 20000.0 if "20.000" in opsi_hpp else (26000.0 if "26.000" in opsi_hpp else 33500.0)
     with f1_d:
-        inp_ambil_cb = st.number_input("4. Rencana Ambil Cashback (Rp):", min_value=0, max_value=200000000, value=int(st.session_state.ambil_cb_nominal), step=1000000, key="fin_cb_inp")
+        inp_ambil_cb = st.number_input("4. Rencana Ambil Cashback (Rp):", min_value=0, max_value=200000000, value=int(st.session_state.get("ambil_cb_nominal", 5000000)), step=1000000, key="fin_cb_inp")
         st.session_state.ambil_cb_nominal = inp_ambil_cb
 
     df_d_okt = db.get('okt_harian', pd.DataFrame()).copy()
@@ -1512,7 +1502,6 @@ elif menu_pilihan == "Iklan & Strategi Ads":
     rofi_total_real = (real_okt / spend_aktif) if spend_aktif > 0 else 1.20
     avg_spend_harian = spend_aktif / hari_berjalan
 
-    # 4 Kartu KPI Atas dari Sheet DATA SPEND OKTOBER & Finance
     a1, a2, a3, a4 = st.columns(4)
     with a1:
         lbl_sp_sub = "Dari Sheet Spend Okt" if spend_sheet_val > 0 else f"Sheet Spend: Rp 0 • Finance: {rp_short(ads_finance_okt)}"
@@ -1522,9 +1511,8 @@ elif menu_pilihan == "Iklan & Strategi Ads":
     with a3:
         render_bento_kpi("ri-money-dollar-circle-line", "orange", "Nominal Closing (Leads Meta)", rp_short(nom_closing_meta), f"ROAS Meta: {roas_meta_real:.2f}x", "orange", f"Real Finance: {rp_short(real_okt)}")
     with a4:
-        render_bento_kpi("ri-Compass-discover-line", "rose", "TargetROAS Satpam Keuangan", f"ROFI {rofi_total_real:.2f}x", "Min Aman: 1.52x | Ideal: 2.63x", "red" if rofi_total_real < 1.52 else "green", f"Sisa Waktu: {sisa_hari_okt} Hari")
+        render_bento_kpi("ri-compass-discover-line", "rose", "Target ROAS Satpam Keuangan", f"ROFI {rofi_total_real:.2f}x", "Min Aman: 1.52x | Ideal: 2.63x", "red" if rofi_total_real < 1.52 else "green", f"Sisa Waktu: {sisa_hari_okt} Hari")
 
-    # SISTEM KOMANDO REKOMENDASI GAS BUDGET HARI INI & STRATEGI ROAS AMAN
     st_left, st_right = st.columns([1.15, 1.65])
     with st_left:
         render_html("""
@@ -1554,7 +1542,6 @@ elif menu_pilihan == "Iklan & Strategi Ads":
 
         budget_hari_ini = st.number_input("2. Nominal Gas Budget Iklan Hari Ini (Rp):", min_value=500000, max_value=50000000, value=max(500000, def_b), step=500000, key="ads_budget_today")
 
-        # Hitung parameter strategi hari ini berdasarkan budget_hari_ini
         min_omset_aman_152 = budget_hari_ini * 1.52
         min_omset_tier3_263 = budget_hari_ini * 2.63
         est_omset_meta_hari_ini = budget_hari_ini * roas_meta_real
