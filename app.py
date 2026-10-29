@@ -18,13 +18,13 @@ FIREBASE_BASE_URL = "https://amalqu-dashboard-default-rtdb.asia-southeast1.fireb
 TZ_WIB = timezone(timedelta(hours=7))
 def now_wib(): return datetime.datetime.now(TZ_WIB)
 
-for k, v in [("dark_mode", True), ("auth_user", None), ("sync_nonce", 0), ("hpp_pilihan", 20000), ("target_mushaf_mode", "meta_lp")]:
+for k, v in [("dark_mode", True), ("auth_user", None), ("sync_nonce", 0)]:
     if k not in st.session_state: st.session_state[k] = v
 
 def render_html(raw_html: str):
     st.markdown(" ".join(line.strip() for line in raw_html.splitlines() if line.strip()), unsafe_allow_html=True)
 
-def build_logo_html(sz=44):
+def build_logo_html(sz=42):
     return (f'<div style="display:inline-flex;align-items:center;justify-content:center;width:{sz}px;height:{sz}px;border-radius:12px;'
             f'background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%);box-shadow:0 4px 14px rgba(249,115,22,0.3);flex-shrink:0;">'
             f'<svg width="{int(sz*0.56)}" height="{int(sz*0.56)}" viewBox="0 0 24 24" fill="none">'
@@ -76,7 +76,7 @@ def clamp_date(dt_val, min_d, max_d):
     return max(min_d, min(dt_val, max_d))
 
 # ==============================================================================
-# RUMUS BAKU SPREADSHEET SATPAM KEUANGAN (POTONG 10% OPS, 65% BELI, 35% CASHBACK)
+# 2. RUMUS BAKU SATPAM KEUANGAN & AUTO-PILOT SMART ADS ADVISOR
 # ==============================================================================
 def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000.0, leads_meta_val=None, mode_kebutuhan="meta_lp"):
     donasi, iklan, hpp = float(donasi_masuk or 0.0), float(biaya_iklan or 0.0), float(hpp_unit or 20000.0)
@@ -90,7 +90,6 @@ def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000
     dsd = profit_iklan - beban_ops_10
     pct_dsd = (dsd / donasi * 100.0) if donasi > 0 else 0.0
 
-    # 1 & 2. Saldo Pembelian Mushaf (65% DSD) & Saldo Cashback Awal (35% DSD)
     saldo_beli_mushaf_65 = 0.65 * dsd
     saldo_cashback_awal_35 = 0.35 * dsd
     total_alokasi_dsd = saldo_beli_mushaf_65 + saldo_cashback_awal_35
@@ -100,14 +99,11 @@ def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000
     keb_okt_total = int(sa_dict.get("kebutuhan_okt", 1818))
 
     if mode_kebutuhan == "okt_sisa":
-        jml_mushaf = keb_okt_sisa
-        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Sisa Kebutuhan Oktober)".replace(",", ".")
+        jml_mushaf, lbl_kebutuhan = keb_okt_sisa, f"{keb_okt_sisa:,} Mushaf (Sisa Kebutuhan Oktober)".replace(",", ".")
     elif mode_kebutuhan == "okt_total":
-        jml_mushaf = keb_okt_total
-        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Total Kebutuhan Oktober)".replace(",", ".")
+        jml_mushaf, lbl_kebutuhan = keb_okt_total, f"{keb_okt_total:,} Mushaf (Total Kebutuhan Oktober)".replace(",", ".")
     else:
-        jml_mushaf = keb_meta_lp_kurang
-        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Kekurangan Meta LP: Kebutuhan {sa_dict.get('kebutuhan_agust_okt',5021):,} - Meta LP {sa_dict.get('meta_lp_total',3074):,})".replace(",", ".")
+        jml_mushaf, lbl_kebutuhan = keb_meta_lp_kurang, f"{keb_meta_lp_kurang:,} Mushaf (Kekurangan Meta LP)".replace(",", ".")
 
     biaya_beli_mushaf = jml_mushaf * hpp
     selisih_saldo_beli = saldo_beli_mushaf_65 - biaya_beli_mushaf
@@ -121,14 +117,13 @@ def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000
     cashback_akhir = max(0.0, saldo_cashback_awal_35 - kekurangan_saldo_beli) + surplus_saldo_beli
     sisa_defisit_setelah_cb = max(0.0, kekurangan_saldo_beli - max(0.0, saldo_cashback_awal_35))
     mushaf_terbeli_saldo65 = int(max(0.0, saldo_beli_mushaf_65) // hpp) if hpp > 0 else 0
-    mushaf_terbeli_dsd = int(max(0.0, dsd) // hpp) if hpp > 0 else 0
 
     if selisih_saldo_beli >= 0:
         status_txt, badge_col = "AMAN (Saldo 65% Cukup Tanpa Potong CB)", "green"
     elif sisa_defisit_setelah_cb == 0:
         status_txt, badge_col = f"POTONG CASHBACK ({rp_short(potong_dari_cashback)})", "orange"
     else:
-        status_txt, badge_col = f"KURANG DANA ({rp_short(sisa_defisit_setelah_cb)} stlh Potong CB)", "red"
+        status_txt, badge_col = f"DEFISIT ({rp_short(sisa_defisit_setelah_cb)} stlh Potong CB)", "red"
 
     df_8_komponen = pd.DataFrame([
         {"Komponen Arus Kas Yayasan": "1. Total Donasi Masuk (Tercatat)",      "Basis / Formula Acuan": "Input Donasi Terhimpun",       "Alokasi %": "100,0%",            "Jumlah Nominal (Rp)": rp(donasi),                "Status Arus Kas": "Sumber Donasi Utama",     "Pedoman & Kebijakan Keuangan Yayasan": "1. Beban Operasional: Dipatok flat 10% dari total donasi masuk yayasan."},
@@ -149,8 +144,52 @@ def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000
         "biaya_beli_mushaf": biaya_beli_mushaf, "selisih_saldo_beli": selisih_saldo_beli,
         "kekurangan_saldo_beli": kekurangan_saldo_beli, "potong_dari_cashback": potong_dari_cashback,
         "cashback_akhir": cashback_akhir, "sisa_defisit_setelah_cb": sisa_defisit_setelah_cb,
-        "mushaf_terbeli_saldo65": mushaf_terbeli_saldo65, "mushaf_terbeli_dsd": mushaf_terbeli_dsd,
-        "status_txt": status_txt, "badge_col": badge_col, "df_8_komponen": df_8_komponen
+        "mushaf_terbeli_saldo65": mushaf_terbeli_saldo65, "status_txt": status_txt, "badge_col": badge_col,
+        "df_8_komponen": df_8_komponen
+    }
+
+def hitung_autopilot_ads(real_okt, spend_aktif, nom_closing_meta, leads_closing_cnt, tot_leads_valid, avg_cr_pct, hari_berjalan, df_har):
+    cr_dec = (avg_cr_pct / 100.0) if avg_cr_pct > 0 else 0.743
+    avg_spend_harian = spend_aktif / max(1, hari_berjalan)
+    roas_meta = (nom_closing_meta / spend_aktif) if spend_aktif > 0 else 0.83
+    rofi_fin = (real_okt / spend_aktif) if spend_aktif > 0 else 1.20
+    aov_meta = nom_closing_meta / max(1, leads_closing_cnt)
+
+    cpr_aktual = spend_aktif / max(1, tot_leads_valid)
+    cpa_closing = spend_aktif / max(1, leads_closing_cnt)
+
+    # Standar Aman CPR terhadap Paket Donasi Minimal Rp 99.000 (99K)
+    batas_cpr_sehat_99k = 49500.0 * cr_dec
+    batas_cpr_maks_99k = 58331.0 * cr_dec
+
+    if rofi_fin >= 2.0 and cpr_aktual <= batas_cpr_sehat_99k:
+        mode_keputusan, badge_keputusan, faktor_kali = "SCALE UP OTOMATIS (+20% BUDGET)", "green", 1.20
+        alasan_utama = f"ROFI Finance ({rofi_fin:.2f}x) sudah >= 2,00x dan CPR ({rp(cpr_aktual)}) aman di bawah batas donasi 99K ({rp(batas_cpr_sehat_99k)})."
+    elif rofi_fin >= 1.50 or cpr_aktual <= batas_cpr_maks_99k:
+        mode_keputusan, badge_keputusan, faktor_kali = "TAHAN BUDGET STABIL (100% RATA-RATA)", "orange", 1.00
+        alasan_utama = f"ROFI ({rofi_fin:.2f}x) cukup menutup HPP dasar, namun CPR ({rp(cpr_aktual)}) mendekati batas toleransi donasi 99K ({rp(batas_cpr_maks_99k)})."
+    else:
+        mode_keputusan, badge_keputusan, faktor_kali = "REM EFISIENSI OTOMATIS (-15% SPEND) & INJEKSI CRM", "red", 0.85
+        alasan_utama = f"Rata-rata CPR ({rp(cpr_aktual)}/lead) melampaui batas aman donasi 99K ({rp(batas_cpr_sehat_99k)}/lead) dan ROFI ({rofi_fin:.2f}x) di bawah standar sehat 2,00x."
+
+    rekom_budget_hari_ini = round((avg_spend_harian * faktor_kali) / 100000.0) * 100000.0
+    target_donasi_hari_ini_2x = rekom_budget_hari_ini * 2.00
+    est_donasi_meta_hari_ini = rekom_budget_hari_ini * roas_meta
+    wajib_subsidi_crm_hari_ini = max(0.0, target_donasi_hari_ini_2x - est_donasi_meta_hari_ini)
+
+    target_leads_hari_ini = max(1, int(np.ceil(rekom_budget_hari_ini / batas_cpr_sehat_99k)))
+    target_closing_hari_ini = max(1, int(np.ceil(target_leads_hari_ini * cr_dec)))
+    min_paket_mushaf = max(2, int(np.ceil((cpa_closing * 2.0) / 99000.0)))
+
+    return {
+        "cpr_aktual": cpr_aktual, "cpa_closing": cpa_closing,
+        "batas_cpr_sehat_99k": batas_cpr_sehat_99k, "batas_cpr_maks_99k": batas_cpr_maks_99k,
+        "mode_keputusan": mode_keputusan, "badge_keputusan": badge_keputusan, "alasan_utama": alasan_utama,
+        "rekom_budget_hari_ini": rekom_budget_hari_ini, "avg_spend_harian": avg_spend_harian,
+        "target_donasi_hari_ini_2x": target_donasi_hari_ini_2x,
+        "est_donasi_meta_hari_ini": est_donasi_meta_hari_ini, "wajib_subsidi_crm_hari_ini": wajib_subsidi_crm_hari_ini,
+        "target_leads_hari_ini": target_leads_hari_ini, "target_closing_hari_ini": target_closing_hari_ini,
+        "min_paket_mushaf": min_paket_mushaf, "aov_meta": aov_meta, "roas_meta": roas_meta, "rofi_fin": rofi_fin
     }
 
 # ==============================================================================
@@ -241,7 +280,7 @@ body,p,label,input,th,td,li{{font-family:'Plus Jakarta Sans',sans-serif!importan
 h1,h2,h3,h4,h5,h6,.metric-num,.brand-title{{font-family:'Outfit',sans-serif!important;color:var(--text-primary)!important;}}
 [data-testid="stIconMaterial"],.material-symbols-rounded,span[translate="no"]{{font-family:'Material Symbols Rounded'!important;}}
 i[class^="ri-"],i[class*=" ri-"]{{font-family:'remixicon'!important;font-style:normal!important;}}
-.block-container{{padding-top:1.2rem!important;padding-bottom:2rem!important;max-width:1440px!important;}}
+.block-container{{padding-top:1.1rem!important;padding-bottom:2rem!important;max-width:1440px!important;}}
 section[data-testid="stSidebar"]{{background-color:var(--bg-card)!important;border-right:1px solid var(--border-soft)!important;width:265px!important;}}
 .sub-box{{background:var(--bg-subcard);border:1px solid var(--border-soft);}}
 section[data-testid="stSidebar"] div[role="radiogroup"]{{gap:6px!important;display:flex!important;flex-direction:column!important;}}
@@ -263,15 +302,16 @@ div[data-baseweb="popover"],ul[role="listbox"],li[role="option"]{{background-col
 button[kind="primary"],button[kind="secondary"],[data-testid="stDownloadButton"] button{{background:var(--bg-card)!important;color:var(--text-primary)!important;border:1px solid var(--border-strong)!important;border-radius:12px!important;font-weight:700!important;padding:8px 14px!important;}}
 [data-testid="stFormSubmitButton"] button{{background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%)!important;color:#FFFFFF!important;border:none!important;border-radius:12px!important;padding:11px 18px!important;}}
 [data-testid="stFormSubmitButton"] button p{{color:#FFFFFF!important;font-weight:700!important;}}
-.bento-card,[data-testid="stForm"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-radius:18px!important;padding:16px 18px!important;box-shadow:0 4px 18px -2px rgba(0,0,0,0.05)!important;margin-bottom:14px!important;overflow:hidden!important;}}
-.kpi-uniform{{min-height:146px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;}}
-.hero-card{{background:linear-gradient(135deg,#4F46E5 0%,#6366F1 55%,#8B5CF6 100%);border-radius:18px;padding:16px 18px;min-height:146px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;color:#FFFFFF!important;box-shadow:0 10px 24px -6px rgba(79,70,229,0.4);margin-bottom:14px;overflow:hidden!important;}}
+.bento-card,[data-testid="stForm"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-radius:18px!important;padding:16px 18px!important;box-shadow:0 4px 18px -2px rgba(0,0,0,0.05)!important;margin-bottom:12px!important;overflow:hidden!important;}}
+.kpi-uniform{{min-height:136px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;}}
+.hero-card{{background:linear-gradient(135deg,#4F46E5 0%,#6366F1 55%,#8B5CF6 100%);border-radius:18px;padding:16px 18px;min-height:136px;height:auto!important;display:flex;flex-direction:column;justify-content:space-between;gap:6px;color:#FFFFFF!important;box-shadow:0 10px 24px -6px rgba(79,70,229,0.4);margin-bottom:12px;overflow:hidden!important;}}
 .hero-card *{{color:#FFFFFF!important;}}
-.kpi-val-fluid{{font-family:'Outfit',sans-serif!important;font-size:clamp(17px,1.55vw,23px)!important;font-weight:800!important;line-height:1.2!important;letter-spacing:-0.4px;word-break:break-word!important;}}
-.satpam-step{{background:var(--bg-subcard);border:1px solid var(--border-soft);border-radius:12px;padding:9px 13px;margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}}
-.satpam-val{{font-family:'Outfit',sans-serif!important;font-size:15.5px;font-weight:800;white-space:nowrap;}}
+.kpi-val-fluid{{font-family:'Outfit',sans-serif!important;font-size:clamp(17px,1.55vw,22.5px)!important;font-weight:800!important;line-height:1.2!important;letter-spacing:-0.4px;word-break:break-word!important;}}
+.section-divider{{font-family:'Outfit',sans-serif!important;font-size:12.5px;font-weight:800;letter-spacing:0.7px;text-transform:uppercase;color:var(--text-muted)!important;margin:8px 0 8px 2px;display:flex;align-items:center;gap:8px;}}
+.satpam-step{{background:var(--bg-subcard);border:1px solid var(--border-soft);border-radius:12px;padding:10px 14px;margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}}
+.satpam-val{{font-family:'Outfit',sans-serif!important;font-size:16px;font-weight:800;white-space:nowrap;}}
 .chart-header-box{{background:var(--bg-card);border:1px solid var(--border-soft);border-bottom:none;border-radius:18px 18px 0 0;padding:16px 20px 8px 20px;margin-bottom:-16px;position:relative;z-index:2;}}
-[data-testid="stPlotlyChart"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-top:none!important;border-radius:0 0 18px 18px!important;padding:4px 12px 8px 12px!important;margin-bottom:14px!important;}}
+[data-testid="stPlotlyChart"]{{background:var(--bg-card)!important;border:1px solid var(--border-soft)!important;border-top:none!important;border-radius:0 0 18px 18px!important;padding:4px 12px 8px 12px!important;margin-bottom:12px!important;}}
 .icon-box{{width:34px;height:34px;border-radius:10px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;font-size:16px;}}
 .ib-indigo{{background:rgba(79,70,229,0.15);color:#6366F1!important;}}.ib-orange{{background:rgba(249,115,22,0.15);color:#F97316!important;}}.ib-emerald{{background:rgba(16,185,129,0.15);color:#10B981!important;}}.ib-rose{{background:rgba(239,68,68,0.15);color:#EF4444!important;}}
 .badge-pill{{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:99px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap!important;max-width:100%;overflow:hidden;text-overflow:ellipsis;}}
@@ -1013,65 +1053,28 @@ def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_them
     arrow_ic = "ri-arrow-right-up-line" if badge_theme in ["green", "indigo"] else ("ri-alert-line" if badge_theme == "red" else "ri-information-line")
     render_html(f'<div class="bento-card kpi-uniform"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;line-height:1.25;">{title}</span><div class="icon-box {ib_map.get(color_theme, "ib-indigo")}"><i class="{icon_cls}"></i></div></div><div class="kpi-val-fluid">{value}</div><div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;"><span class="badge-pill {bp_map.get(badge_theme, "bp-green")}"><i class="{arrow_ic}"></i> {badge_text}</span><span style="font-size:10.5px;color:var(--text-muted)!important;font-weight:600;">{subtext}</span></div></div>')
 
-def render_satpam_5_highlight_card(sm_dict, title_box="Satpam Keuangan: 5 Indikator Utama (Rumus Spreadsheet)"):
+def step_item_html(title, sub, val, color, is_last=False):
+    mb = "0" if is_last else "7px"
+    return f'<div class="satpam-step" style="border-left:4px solid {color};margin-bottom:{mb};"><div><div style="font-size:12px;font-weight:700;">{title}</div><div style="font-size:10.5px;color:var(--text-muted)!important;">{sub}</div></div><div class="satpam-val" style="color:{color}!important;">{val}</div></div>'
+
+def render_satpam_5_highlight_card(sm_dict, title_box="Satpam Keuangan: 5 Indikator Utama"):
     if sm_dict['selisih_saldo_beli'] >= 0:
-        lbl_no4 = "4. Surplus Saldo Pembelian (Tidak Perlu Potong Cashback)"
+        lbl_no4 = "4. Surplus Saldo Pembelian (Tanpa Potong Cashback)"
         sub_no4 = f"Saldo Pembelian 65% berlebih +{rp(sm_dict['selisih_saldo_beli'])} • Potong Cashback: Rp 0"
         val_no4, col_no4 = f"+{rp(sm_dict['selisih_saldo_beli'])}", "#10B981"
     else:
-        lbl_no4 = "4. Kekurangan Saldo Pembelian & Kebutuhan Potong Cashback"
+        lbl_no4 = "4. Kekurangan Saldo Pembelian & Potong Cashback"
         sub_no4 = f"Kurang {rp(sm_dict['kekurangan_saldo_beli'])} • Dipotong dari Cashback: {rp(sm_dict['potong_dari_cashback'])}" + (f" (Sisa Defisit: {rp(sm_dict['sisa_defisit_setelah_cb'])})" if sm_dict['sisa_defisit_setelah_cb'] > 0 else "")
         val_no4, col_no4 = f"-{rp(sm_dict['kekurangan_saldo_beli'])}", "#EF4444"
     col_cb_akhir = "#10B981" if sm_dict['cashback_akhir'] > 0 else "#EF4444"
 
-    render_html(f"""
-    <div class="bento-card" style="min-height:405px;display:flex;flex-direction:column;justify-content:space-between;">
-        <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-                <span style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:14.8px;"><i class="ri-shield-star-fill" style="color:#6366F1!important;"></i> {title_box}</span>
-                <span class="badge-pill bp-{sm_dict['badge_col']}">{sm_dict['status_txt']}</span>
-            </div>
-            <div style="font-size:11px;color:var(--text-secondary)!important;margin-bottom:8px;padding:6px 10px;background:var(--bg-subcard);border-radius:8px;">
-                Donasi: <b>{rp_short(sm_dict['donasi'])}</b> − Iklan: <b>{rp_short(sm_dict['iklan'])}</b> = Profit: <b>{rp_short(sm_dict['profit_iklan'])}</b> − Ops 10%: <b>{rp_short(sm_dict['beban_ops_10'])}</b> → <b>DSD: {rp(sm_dict['dsd'])}</b>
-            </div>
-            <div class="satpam-step" style="border-left:4px solid #6366F1;">
-                <div>
-                    <div style="font-size:12px;font-weight:700;">1. Saldo Pembelian Mushaf (65% dari DSD)</div>
-                    <div style="font-size:10.5px;color:var(--text-muted)!important;">Sudah dipotong Biaya Iklan, Operasional 10% & Cashback 35%</div>
-                </div>
-                <div class="satpam-val" style="color:#6366F1!important;">{rp(sm_dict['saldo_beli_mushaf_65'])}</div>
-            </div>
-            <div class="satpam-step" style="border-left:4px solid #10B981;">
-                <div>
-                    <div style="font-size:12px;font-weight:700;">2. Saldo Cashback Awal (35% dari DSD)</div>
-                    <div style="font-size:10.5px;color:var(--text-muted)!important;">Kas cadangan abadi sebelum dipotong untuk talangan beli mushaf</div>
-                </div>
-                <div class="satpam-val" style="color:#10B981!important;">{rp(sm_dict['saldo_cashback_awal_35'])}</div>
-            </div>
-            <div class="satpam-step" style="border-left:4px solid #F97316;">
-                <div>
-                    <div style="font-size:12px;font-weight:700;">3. Biaya Pembelian Mushaf ({sm_dict['jml_mushaf']:,} Pcs × {rp(sm_dict['hpp'])})</div>
-                    <div style="font-size:10.5px;color:var(--text-muted)!important;">{sm_dict['lbl_kebutuhan']}</div>
-                </div>
-                <div class="satpam-val" style="color:#F97316!important;">{rp(sm_dict['biaya_beli_mushaf'])}</div>
-            </div>
-            <div class="satpam-step" style="border-left:4px solid {col_no4};">
-                <div>
-                    <div style="font-size:12px;font-weight:700;">{lbl_no4}</div>
-                    <div style="font-size:10.5px;color:var(--text-muted)!important;">{sub_no4}</div>
-                </div>
-                <div class="satpam-val" style="color:{col_no4}!important;">{val_no4}</div>
-            </div>
-            <div class="satpam-step" style="border-left:4px solid {col_cb_akhir};margin-bottom:0;">
-                <div>
-                    <div style="font-size:12px;font-weight:700;">5. Cashback Akhir (Kalau Dipotong Kekurangan Beli)</div>
-                    <div style="font-size:10.5px;color:var(--text-muted)!important;">Sisa bersih Saldo Cashback 35% setelah talangan beli mushaf</div>
-                </div>
-                <div class="satpam-val" style="color:{col_cb_akhir}!important;">{rp(sm_dict['cashback_akhir'])}</div>
-            </div>
-        </div>
-    </div>
-    """)
+    s1 = step_item_html("1. Saldo Pembelian Mushaf (65% dari DSD)", "Sudah dipotong Biaya Iklan, Operasional 10% & Cashback 35%", rp(sm_dict['saldo_beli_mushaf_65']), "#6366F1")
+    s2 = step_item_html("2. Saldo Cashback Awal (35% dari DSD)", "Kas cadangan abadi sebelum dipotong untuk talangan beli mushaf", rp(sm_dict['saldo_cashback_awal_35']), "#10B981")
+    s3 = step_item_html(f"3. Biaya Pembelian Mushaf ({sm_dict['jml_mushaf']:,} Pcs × {rp(sm_dict['hpp'])})", sm_dict['lbl_kebutuhan'], rp(sm_dict['biaya_beli_mushaf']), "#F97316")
+    s4 = step_item_html(lbl_no4, sub_no4, val_no4, col_no4)
+    s5 = step_item_html("5. Cashback Akhir (Kalau Dipotong Kekurangan Beli)", "Sisa bersih Saldo Cashback 35% setelah talangan beli mushaf", rp(sm_dict['cashback_akhir']), col_cb_akhir, is_last=True)
+
+    render_html(f'<div class="bento-card" style="min-height:400px;display:flex;flex-direction:column;justify-content:space-between;"><div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-family:\'Outfit\',sans-serif!important;font-weight:800;font-size:14.8px;"><i class="ri-shield-star-fill" style="color:#6366F1!important;"></i> {title_box}</span><span class="badge-pill bp-{sm_dict["badge_col"]}">{sm_dict["status_txt"]}</span></div><div style="font-size:11px;color:var(--text-secondary)!important;margin-bottom:8px;padding:6px 10px;background:var(--bg-subcard);border-radius:8px;">Donasi: <b>{rp_short(sm_dict["donasi"])}</b> − Iklan: <b>{rp_short(sm_dict["iklan"])}</b> − Ops 10%: <b>{rp_short(sm_dict["beban_ops_10"])}</b> → <b>DSD: {rp(sm_dict["dsd"])}</b></div>{s1}{s2}{s3}{s4}{s5}</div></div>')
 
 def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme="indigo"):
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
@@ -1154,14 +1157,14 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
 # ==============================================================================
 hdr_col_left, hdr_col_right = st.columns([7.5, 1.1])
 with hdr_col_left:
-    render_html(f'<div class="bento-card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 18px!important;margin-bottom:14px!important;"><div style="display:flex;align-items:center;gap:12px;">{build_logo_html(40)}<div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-family:\'Outfit\',sans-serif!important;font-size:20px;font-weight:800;">AmalQu</span><span class="badge-pill bp-orange">{menu_pilihan}</span></div><div style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;">Yayasan AmalQu Indonesia Peduli • Enterprise Command Center</div></div></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span class="badge-pill bp-indigo"><i class="ri-user-star-line"></i> {current_user["username_display"]} ({user_role})</span><span class="badge-pill bp-green"><i class="ri-database-2-fill" style="font-size:11px;"></i> {db["last_sync"]}</span></div></div>')
+    render_html(f'<div class="bento-card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 18px!important;margin-bottom:12px!important;"><div style="display:flex;align-items:center;gap:12px;">{build_logo_html(40)}<div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-family:\'Outfit\',sans-serif!important;font-size:20px;font-weight:800;">AmalQu</span><span class="badge-pill bp-orange">{menu_pilihan}</span></div><div style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;">Yayasan AmalQu Indonesia Peduli • Enterprise Command Center</div></div></div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span class="badge-pill bp-indigo"><i class="ri-user-star-line"></i> {current_user["username_display"]} ({user_role})</span><span class="badge-pill bp-green"><i class="ri-database-2-fill" style="font-size:11px;"></i> {db["last_sync"]}</span></div></div>')
 with hdr_col_right:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     if st.button("☀️ Terang" if is_dark else "🌙 Gelap", key="top_theme_toggle", use_container_width=True):
         st.session_state.dark_mode = not st.session_state.dark_mode; st.rerun()
 
 # ==============================================================================
-# HALAMAN 1: DASHBOARD OVERVIEW (RUMUS SATPAM SPREADSHEET + FOKUS META LP)
+# HALAMAN 1: DASHBOARD OVERVIEW (ZERO DROPDOWN, 3 ZONA BERSIH & FOKUS META LP)
 # ==============================================================================
 if menu_pilihan == "Dashboard Overview":
     fm = db['okt_finance_mon']
@@ -1176,31 +1179,25 @@ if menu_pilihan == "Dashboard Overview":
     laju_harian_real = float(fm.get('avg_donasi_hari', real_okt / max(1, hari_cutoff)))
     proyeksi_akhir_bulan_real = float(fm.get('estimasi_akhir_bulan', laju_harian_real * 31))
 
-    ov_opt1, ov_opt2 = st.columns([2.2, 1.8])
-    with ov_opt1:
-        pil_keb_ov = st.selectbox("Acuan Kebutuhan Mushaf (Satpam Keuangan):", [f"Kekurangan Mushaf Meta LP ({sa['kekurangan_meta_lp']:,} Mushaf)", f"Sisa Kebutuhan Oktober ({sa['gap_okt']:,} Mushaf)", f"Total Kebutuhan Oktober ({sa['kebutuhan_okt']:,} Mushaf)"], key="ov_keb_sel")
-        mode_keb_ov = "okt_sisa" if "Sisa Kebutuhan" in pil_keb_ov else ("okt_total" if "Total Kebutuhan" in pil_keb_ov else "meta_lp")
-    with ov_opt2:
-        pil_hpp_ov = st.selectbox("Pilih Opsi HPP Mushaf (Sesuai Pedoman No.7):", ["Tier 1: Rp 20.000 / Mushaf (Soft Cover)", "Tier 2: Rp 35.000 / Mushaf (Standar)", "Tier 3: Rp 49.000 / Mushaf (Premium)"], key="ov_hpp_sel")
-        hpp_ov_val = 20000.0 if "20.000" in pil_hpp_ov else (35000.0 if "35.000" in pil_hpp_ov else 49000.0)
-
     non_tot_s = db['okt_sumber'][db['okt_sumber']['CS / CRM'].astype(str).str.upper() != 'TOTAL']
     leads_meta_okt = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 205624456.0
-    sm_ov = hitung_satpam_spreadsheet(real_okt, ads_okt, sa, hpp_unit=hpp_ov_val, leads_meta_val=leads_meta_okt, mode_kebutuhan=mode_keb_ov)
+    sm_ov = hitung_satpam_spreadsheet(real_okt, ads_okt, sa, hpp_unit=20000.0, leads_meta_val=leads_meta_okt, mode_kebutuhan="meta_lp")
     roas_okt_val = float(fm.get('roas_akuisisi', sm_ov['roas_meta']))
     rofi_okt_val = float(fm.get('rofi_real', sm_ov['rofi_real']))
     tot_fin_ytd = df_macro['Realisasi Finance'].sum()
 
+    render_html('<div class="section-divider"><i class="ri-funds-box-line" style="color:#6366F1!important;"></i> 1. RINGKASAN EKSEKUTIF KEUANGAN & TARGET BULAN INI</div>')
     c1, c2, c3, c4 = st.columns(4)
     with c1: render_bento_kpi("ri-bank-line", "indigo", "Realisasi Finance (Okt)", rp_short(real_okt), f"{(real_okt/target_okt)*100:.1f}% Target", "indigo", f"YTD: {rp_short(tot_fin_ytd)}")
-    with c2: render_bento_kpi("ri-user-voice-line", "emerald", "Dashboard CS (Oktober)", rp_short(cs_okt_total), f"Bank +{rp_short(selisih_real_cs_okt)}", "green", f"Final: {rp_short(cs_okt_final)}")
-    with c3: render_bento_kpi("ri-line-chart-line", "orange", "Proyeksi Akhir Bulan", rp_short(proyeksi_akhir_bulan_real), f"{(proyeksi_akhir_bulan_real/target_okt)*100:.1f}% Target", "orange", f"Avg: {rp_short(laju_harian_real)}/hr")
+    with c2: render_bento_kpi("ri-user-voice-line", "emerald", "Input Dashboard CS (Okt)", rp_short(cs_okt_total), f"Bank +{rp_short(selisih_real_cs_okt)}", "green", f"Final: {rp_short(cs_okt_final)}")
+    with c3: render_bento_kpi("ri-line-chart-line", "orange", "Proyeksi Akhir Bulan (31 Okt)", rp_short(proyeksi_akhir_bulan_real), f"{(proyeksi_akhir_bulan_real/target_okt)*100:.1f}% Target", "orange", f"Avg: {rp_short(laju_harian_real)}/hr")
     with c4:
-        render_html(f'<div class="hero-card"><div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:11px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;">SATPAM KEUANGAN (REAL)</span><i class="ri-shield-star-line" style="font-size:17px;"></i></div><div class="kpi-val-fluid">ROAS {roas_okt_val:.2f}x <span style="opacity:0.65;font-weight:500;">|</span> ROFI {rofi_okt_val:.2f}x</div><div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.16);padding:5px 10px;border-radius:10px;font-size:10.5px;font-weight:600;gap:6px;flex-wrap:wrap;"><span class="nowrap-val">Saldo 65%: {rp_short(sm_ov["saldo_beli_mushaf_65"])}</span><span class="nowrap-val">CB 35%: {rp_short(sm_ov["saldo_cashback_awal_35"])}</span></div></div>')
+        render_html(f'<div class="hero-card"><div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:11px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;">EFEKTIVITAS IKLAN (OKT)</span><i class="ri-shield-star-line" style="font-size:17px;"></i></div><div class="kpi-val-fluid">ROAS {roas_okt_val:.2f}x <span style="opacity:0.65;font-weight:500;">|</span> ROFI {rofi_okt_val:.2f}x</div><div style="display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.16);padding:5px 10px;border-radius:10px;font-size:10.5px;font-weight:600;gap:6px;flex-wrap:wrap;"><span class="nowrap-val">Ads: {rp_short(ads_okt)}</span><span class="nowrap-val">DSD: {rp_short(sm_ov["dsd"])}</span></div></div>')
 
-    m_left, m_right = st.columns([1.5, 1.3])
+    render_html('<div class="section-divider"><i class="ri-shield-check-line" style="color:#10B981!important;"></i> 2. TREN KEUANGAN BULANAN & 5 INDIKATOR UTAMA SATPAM KEUANGAN</div>')
+    m_left, m_right = st.columns([1.45, 1.35])
     with m_left:
-        render_chart_header("Komparasi Real Finance vs Dashboard CS & Proyeksi Akhir Bulan", f"Realisasi Finance Okt: {rp(real_okt)} • Input CS: {rp(cs_okt_total)} • Estimasi 31 Okt: {rp(proyeksi_akhir_bulan_real)}", "Jan – Okt 2026", "indigo")
+        render_chart_header("Komparasi Real Finance vs Input CS & Proyeksi Akhir Bulan", f"Realisasi Finance Okt: {rp(real_okt)} • Input CS: {rp(cs_okt_total)} • Estimasi 31 Okt: {rp(proyeksi_akhir_bulan_real)}", "Jan – Okt 2026", "indigo")
         fig_ov = go.Figure()
         fig_ov.add_trace(go.Scatter(x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Real Finance (Bank)', mode='lines+markers', line=dict(color='#6366F1', width=3, shape='spline'), fill='tozeroy', fillcolor='rgba(99, 102, 241, 0.1)'))
         fig_ov.add_trace(go.Scatter(x=df_macro['Bulan'], y=df_macro['Omset CS'], name='Input Dashboard CS', mode='lines+markers', line=dict(color='#10B981', width=2.6, shape='spline')))
@@ -1211,26 +1208,28 @@ if menu_pilihan == "Dashboard Overview":
         st.plotly_chart(fig_ov, use_container_width=True)
 
     with m_right:
-        render_satpam_5_highlight_card(sm_ov, "Satpam Keuangan: 5 Indikator Utama (Rumus Spreadsheet)")
+        render_satpam_5_highlight_card(sm_ov, "Satpam Keuangan: 5 Indikator Utama (HPP Standar Rp 20rb)")
 
-    # 3 KARTU BAWAH OVERVIEW: HANYA DATA META LP + PERBANDINGAN DISTRIBUSI VS (META LP + TIKTOK)
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Stok Mushaf Meta LP (Siap & Belum Siap)</span><span class="badge-pill bp-indigo">Total Meta LP: {sa["meta_lp_total"]:,} Pcs</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">Siap: {sa["meta_lp_siap"]:,} • Belum: {sa["meta_lp_belum"]:,} Pcs</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:98%;background:#10B981;border-radius:99px;"></div><div style="width:2%;background:#F97316;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Super Tajwid: <b>{sa["st_siap"]:,} Siap</b></span><span>Al-Wakaf Meta: <b>{sa["aw_meta_siap"]:,} Siap / {sa["aw_meta_belum"]} Belum</b></span></div></div>')
-    with b2:
-        render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Total Kekurangan Mushaf (Meta LP)</span><span class="badge-pill bp-red">Kurang {sa["kekurangan_meta_lp"]:,} Mushaf</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">Wajib Beli {sa["kekurangan_meta_lp"]:,} Pcs</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:61%;background:#6366F1;border-radius:99px;"></div><div style="width:39%;background:#EF4444;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Kebutuhan 3 Bln: <b>{sa["kebutuhan_agust_okt"]:,} Pcs</b></span><span>Stok Meta LP: <b>{sa["meta_lp_total"]:,} Pcs</b></span></div></div>')
-    with b3:
+    render_html('<div class="section-divider"><i class="ri-book-mark-line" style="color:#F97316!important;"></i> 3. STATUS STOK MUSHAF META LP & PERBANDINGAN TOTAL DISTRIBUSI</div>')
+    l1, l2, l3, l4 = st.columns(4)
+    with l1:
+        render_bento_kpi("ri-checkbox-circle-line", "emerald", "Meta LP Siap Disalurkan", f"{sa['meta_lp_siap']:,} Mushaf".replace(",", "."), f"ST: {sa['st_siap']} • AW Meta: {sa['aw_meta_siap']:,}".replace(",", "."), "green", "Sudah Tempel Stiker")
+    with l2:
+        render_bento_kpi("ri-time-line", "orange", "Meta LP Belum Siap Salur", f"{sa['meta_lp_belum']:,} Mushaf".replace(",", "."), f"Total Meta LP: {sa['meta_lp_total']:,} Pcs".replace(",", "."), "orange", f"ST: {sa['st_belum']} • AW Meta: {sa['aw_meta_belum']}")
+    with l3:
+        render_bento_kpi("ri-alarm-warning-fill", "rose", "Total Kekurangan (Meta LP)", f"{sa['kekurangan_meta_lp']:,} Mushaf".replace(",", "."), f"Wajib Beli {sa['kekurangan_meta_lp']:,} Pcs".replace(",", "."), "red", f"Kebutuhan {sa['kebutuhan_agust_okt']:,} - Meta LP {sa['meta_lp_total']:,}".replace(",", "."))
+    with l4:
         lbl_3bln = f"Kurang {sa['selisih_gabungan_vs_3bln']:,} Pcs" if sa['selisih_gabungan_vs_3bln'] < 0 else f"Berlebih +{sa['selisih_gabungan_vs_3bln']:,} Pcs"
         lbl_okt_d = f"Berlebih +{sa['selisih_gabungan_vs_okt']:,} Pcs" if sa['selisih_gabungan_vs_okt'] >= 0 else f"Kurang {sa['selisih_gabungan_vs_okt']:,} Pcs"
-        render_html(f'<div class="bento-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:12.5px;font-weight:700;">Distribusi vs (Meta LP + TikTok: {sa["stok_fisik_mushaf_tersedia"]:,})</span><span class="badge-pill bp-orange">3 Bln: {lbl_3bln}</span></div><div class="kpi-val-fluid" style="margin-bottom:8px;">Okt ({sa["kebutuhan_okt"]:,}): {lbl_okt_d}</div><div style="display:flex;height:9px;border-radius:99px;overflow:hidden;gap:3px;margin-bottom:8px;background:var(--bg-subcard);"><div style="width:71%;background:#10B981;border-radius:99px;"></div><div style="width:29%;background:#EF4444;border-radius:99px;"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;color:var(--text-secondary)!important;flex-wrap:wrap;gap:4px;"><span>Meta+TikTok: <b>{sa["stok_fisik_mushaf_tersedia"]:,} Pcs</b></span><span>Distribusi 3 Bln: <b>{sa["kebutuhan_agust_okt"]:,} ({lbl_3bln})</b></span></div></div>')
+        render_bento_kpi("ri-scales-3-line", "indigo", "Distribusi vs (Meta LP + TikTok)", f"{sa['stok_fisik_mushaf_tersedia']:,} Mushaf".replace(",", "."), f"vs 3 Bln ({sa['kebutuhan_agust_okt']:,}): {lbl_3bln}".replace(",", "."), "orange" if sa['selisih_gabungan_vs_3bln'] < 0 else "green", f"vs Okt ({sa['kebutuhan_okt']:,}): {lbl_okt_d}".replace(",", "."))
 
 # ==============================================================================
-# HALAMAN 2: DONASI & SATPAM KEUANGAN (8 KOMPONEN SPREADSHEET + 5 HIGHLIGHT)
+# HALAMAN 2: DONASI & SATPAM KEUANGAN (MURNI FINANCE — TANPA DATA CS/LEADS)
 # ==============================================================================
 elif menu_pilihan == "Donasi & Satpam Keuangan":
     f1_a, f1_b, f1_c = st.columns(3)
     with f1_a:
-        cakupan_fin = st.selectbox("1. Pilih Cakupan Periode Analisis:", ["Bulan Oktober 2026 (Realtime)", "Pilih Bulan Historis (Januari – September)", "Akumulasi Tahunan (YTD Jan–Okt)"], key="fin_scope")
+        cakupan_fin = st.selectbox("1. Pilih Periode Keuangan:", ["Bulan Oktober 2026 (Realtime)", "Pilih Bulan Historis (Januari – September)", "Akumulasi Tahunan (YTD Jan–Okt)"], key="fin_scope")
     with f1_b:
         if cakupan_fin == "Pilih Bulan Historis (Januari – September)":
             bln_terpilih = st.selectbox("2. Pilih Bulan Historis:", [b for b in df_macro['Bulan'].tolist() if b != "Oktober"], key="fin_hist_m")
@@ -1243,217 +1242,113 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
         opsi_hpp = st.selectbox("3. Pilih HPP Pembelian Mushaf (Pedoman No.7):", ["Tier 1: Rp 20.000 / Mushaf (Soft Cover)", "Tier 2: Rp 35.000 / Mushaf (Standar)", "Tier 3: Rp 49.000 / Mushaf (Premium)"], key="fin_hpp_sel")
         hpp_terpilih = 20000.0 if "20.000" in opsi_hpp else (35000.0 if "35.000" in opsi_hpp else 49000.0)
 
-    df_d_okt = db.get('okt_harian', pd.DataFrame()).copy()
     if cakupan_fin == "Akumulasi Tahunan (YTD Jan–Okt)":
         d_fin, b_ads = float(df_macro['Realisasi Finance'].sum()), float(df_macro['Budget Iklan'].sum())
-        leads_meta_cur = d_fin * 0.80
-        lbl_badge = "YTD Jan–Okt"
+        leads_meta_cur, lbl_badge = d_fin * 0.80, "YTD Jan–Okt"
     elif cakupan_fin == "Pilih Bulan Historis (Januari – September)":
         rb = df_macro[df_macro['Bulan'] == bln_terpilih].iloc[0]
         d_fin, b_ads = float(rb['Realisasi Finance']), float(rb['Budget Iklan'])
-        leads_meta_cur = d_fin * 0.80
-        lbl_badge = f"{bln_terpilih} 2026"
+        leads_meta_cur, lbl_badge = d_fin * 0.80, f"{bln_terpilih} 2026"
     else:
         rb = df_macro[df_macro['Bulan'] == 'Oktober'].iloc[0]
         d_fin, b_ads = float(rb['Realisasi Finance']), float(rb['Budget Iklan'])
         non_tot_s = db['okt_sumber'][db['okt_sumber']['CS / CRM'].astype(str).str.upper() != 'TOTAL']
-        leads_meta_cur = float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 205624456.0
-        lbl_badge = "Okt 2026"
+        leads_meta_cur, lbl_badge = (float(non_tot_s['Leads Meta'].sum()) if not non_tot_s.empty else 205624456.0), "Oktober 2026"
 
     sm = hitung_satpam_spreadsheet(d_fin, b_ads, sa, hpp_unit=hpp_terpilih, leads_meta_val=leads_meta_cur, mode_kebutuhan=mode_keb_val)
 
+    render_html('<div class="section-divider"><i class="ri-exchange-dollar-line" style="color:#6366F1!important;"></i> TAHAP 1: ALUR POTONGAN IKLAN & BEBAN OPERASIONAL 10% (MENUJU DANA SIAP DISALURKAN)</div>')
     c1, c2, c3, c4 = st.columns(4)
-    with c1: render_bento_kpi("ri-wallet-3-line", "indigo", "1. Saldo Pembelian Mushaf (65%)", rp_short(sm['saldo_beli_mushaf_65']), f"DSD (Setelah Ops 10%): {rp_short(sm['dsd'])}", "indigo", f"Cukup Beli: {sm['mushaf_terbeli_saldo65']:,} Mushaf")
-    with c2: render_bento_kpi("ri-safe-2-line", "emerald", "2. Saldo Cashback Awal (35%)", rp_short(sm['saldo_cashback_awal_35']), "35% dari DSD", "green", f"Ops 10%: {rp_short(sm['beban_ops_10'])}")
-    with c3: render_bento_kpi("ri-shopping-bag-3-line", "orange", f"3. Biaya Beli {sm['jml_mushaf']:,} Mushaf", rp_short(sm['biaya_beli_mushaf']), f"Kekurangan 65%: {rp_short(sm['kekurangan_saldo_beli'])}", "red" if sm['kekurangan_saldo_beli'] > 0 else "green", f"@ {rp(sm['hpp'])} / Mushaf")
-    with c4: render_bento_kpi("ri-coins-line", "rose", "5. Cashback Akhir (Stlh Potong)", rp_short(sm['cashback_akhir']), f"Potong CB: {rp_short(sm['potong_dari_cashback'])}", sm['badge_col'], f"Sisa Defisit: {rp_short(sm['sisa_defisit_setelah_cb'])}")
+    with c1: render_bento_kpi("ri-bank-card-line", "indigo", f"1. Total Donasi Masuk ({lbl_badge})", rp_short(sm['donasi']), "100% Sumber Donasi Utama", "indigo", rp(sm['donasi']))
+    with c2: render_bento_kpi("ri-advertisement-line", "orange", "2. Biaya Iklan & Profit Iklan", rp_short(sm['iklan']), f"Profit Iklan: {rp_short(sm['profit_iklan'])}", "orange", f"ROFI: {sm['rofi_real']:.2f}x")
+    with c3: render_bento_kpi("ri-File-shield-2-line", "rose", "3. Beban Operasional (10%)", rp_short(sm['beban_ops_10']), "Flat 10% × Total Donasi", "red", rp(sm['beban_ops_10']))
+    with c4: render_bento_kpi("ri-wallet-3-line", "emerald", "4. Donasi Siap Disalurkan (DSD)", rp_short(sm['dsd']), "Profit Iklan − Operasional 10%", "green" if sm['dsd'] > 0 else "red", rp(sm['dsd']))
 
-    g_left, g_right = st.columns([1.45, 1.35])
+    render_html('<div class="section-divider"><i class="ri-shield-star-line" style="color:#10B981!important;"></i> TAHAP 2: 5 INDIKATOR UTAMA SATPAM KEUANGAN (ALOKASI MUSHAF 65% vs CASHBACK 35%)</div>')
+    g_left, g_right = st.columns([1.35, 1.45])
     with g_left:
-        render_chart_header("Tren Harian Donasi Oktober 2026 (Leads Meta + CRM)", "Perolehan donasi harian CS Nisa, Salma, dan Aulia", lbl_badge, "orange")
-        fig_f2 = go.Figure()
-        if not df_d_okt.empty:
-            fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Nisa'], name='CS Nisa', mode='lines+markers', line=dict(color='#FF6B4A', width=2.8, shape='spline')))
-            fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Salma'], name='CS Salma', mode='lines+markers', line=dict(color='#6366F1', width=2.8, shape='spline')))
-            fig_f2.add_trace(go.Scatter(x=df_d_okt['Tanggal'], y=df_d_okt['Aulia'], name='CS Aulia', mode='lines+markers', line=dict(color='#10B981', width=2.8, shape='spline')))
-        apply_saas_plotly(fig_f2, height=355, is_currency=True)
-        st.plotly_chart(fig_f2, use_container_width=True)
-
+        render_satpam_5_highlight_card(sm, f"5 Indikator Inti Satpam Keuangan ({lbl_badge})")
     with g_right:
-        render_satpam_5_highlight_card(sm, f"Satpam Keuangan ({lbl_badge}) — 5 Indikator Utama")
+        render_chart_header("Komparasi Bulanan: Realisasi Donasi Finance vs Biaya Iklan vs Laba Bersih", "Murni data keuangan yayasan sepanjang Januari – Oktober 2026", "Jan – Okt 2026", "indigo")
+        fig_f1 = go.Figure()
+        fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Realisasi Finance', marker_color='#6366F1', marker_cornerradius=6))
+        fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Budget Iklan'], name='Biaya Iklan', marker_color='#FF6B4A', marker_cornerradius=6))
+        fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Laba Bersih'], name='Profit Iklan', marker_color='#10B981', marker_cornerradius=6))
+        apply_saas_plotly(fig_f1, height=360, is_currency=True)
+        fig_f1.update_layout(barmode='group')
+        st.plotly_chart(fig_f1, use_container_width=True)
 
-    render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:800;margin:6px 0;"><i class="ri-file-list-3-line" style="color:#10B981!important;"></i> TABEL LENGKAP KOMPONEN ARUS KAS & PEDOMAN KEBIJAKAN KEUANGAN YAYASAN (SESUAI SPREADSHEET SATPAM)</div>')
+    render_html('<div class="section-divider"><i class="ri-table-2" style="color:#F97316!important;"></i> TABEL LENGKAP 8 KOMPONEN ARUS KAS & PEDOMAN KEBIJAKAN KEUANGAN YAYASAN</div>')
     render_saas_table(sm['df_8_komponen'])
 
-    opsi_tabel_t1 = [
-        "1. Rekapitulasi Pendapatan Harian per CS (Leads Meta vs CRM + CR Harian)",
-        "2. Tabel Komparasi Kinerja CS Oktober (Total vs Final & Sisa Target)",
-        "3. Analisis Sumber Kontak & Rasio Kanal ROAS/ROFI (Oktober)",
-        "4. Rekapitulasi Makro Bulanan (Jan–Okt)"
-    ]
-    if user_role != "Advertiser": opsi_tabel_t1.append("5. Pencarian Riwayat Donatur (Mini CRM)")
-    sub_t1 = st.radio("Pilih Tabel Detail Keuangan & CS:", opsi_tabel_t1, horizontal=True, key="t1_subtable")
-
-    if sub_t1.startswith("1."): render_rekap_harian_cs_table(df_d_okt, db['avg_cr_okt'])
-    elif sub_t1.startswith("2."):
-        df_ok = db['okt_cs_table'].copy()
-        for cr in ['Harian (Total)', 'Harian (Final)', 'Mingguan (Total)', 'Mingguan (Final)', 'Bulanan (Total)', 'Bulanan (Final)', 'Target (Rp)', 'Sisa Target', 'Pending Verifikasi', 'Target Harian (Sisa)']:
-            if cr in df_ok.columns: df_ok[cr] = df_ok[cr].apply(rp)
-        render_saas_table(df_ok)
-    elif sub_t1.startswith("3."):
-        col_s1, col_s2 = st.columns([1.3, 1])
-        with col_s1:
-            df_sr = db['okt_sumber'].copy()
-            for cr in ['Leads Meta', 'Repeat Order CRM', 'Repeat Order non CRM', 'Lainnya', 'Total Nominal']:
-                if cr in df_sr.columns: df_sr[cr] = df_sr[cr].apply(rp)
-            render_saas_table(df_sr)
-        with col_s2: render_saas_table(db['okt_kanal_rasio'])
-    elif sub_t1.startswith("4."):
-        df_show = df_macro.copy()
-        if user_role == "Advertiser" and "Mushaf Terverifikasi" in df_show.columns: df_show.drop(columns=["Mushaf Terverifikasi"], inplace=True)
-        for cr in ['Target Bulanan', 'Realisasi Finance', 'Omset CS', 'Selisih Target', 'Selisih Finance vs CS', 'Budget Iklan', 'Total Pengeluaran', 'Laba Bersih']:
-            if cr in df_show.columns: df_show[cr] = df_show[cr].apply(rp)
-        df_show['% Capaian'] = df_show['% Capaian'].apply(lambda x: f"{x:.1f}%")
-        df_show['ROFI'] = df_show['ROFI'].apply(lambda x: f"{x:.2f}x")
-        if 'ROAS_Est' in df_show.columns:
-            df_show['ROAS'] = df_show['ROAS_Est'].apply(lambda x: f"{x:.2f}x")
-            df_show.drop(columns=['ROAS_Est'], inplace=True)
-        render_saas_table(df_show)
-    else:
-        q_d = st.text_input("Ketik Nama Donatur atau Nomor WhatsApp:", placeholder="Contoh: Donatur Prioritas, 628...")
-        if q_d:
-            dfc, _ = load_lazy_contacts_db(current_sync_token)
-            m_d = dfc['Nama Donatur'].astype(str).str.contains(q_d, case=False, na=False) | dfc['Nomor Whatsapp'].astype(str).str.contains(q_d, case=False, na=False)
-            render_saas_table(dfc[m_d], max_rows=30)
+    render_html('<div class="section-divider"><i class="ri-calendar-check-line" style="color:#6366F1!important;"></i> REKAPITULASI MAKRO FINANCE BULANAN (JANUARI – OKTOBER 2026)</div>')
+    df_fin_only = df_macro[["Bulan", "Target Bulanan", "Realisasi Finance", "Selisih Target", "% Capaian", "Budget Iklan", "Laba Bersih", "ROFI", "Status Target"]].copy()
+    for cr in ["Target Bulanan", "Realisasi Finance", "Selisih Target", "Budget Iklan", "Laba Bersih"]:
+        df_fin_only[cr] = df_fin_only[cr].apply(rp)
+    df_fin_only["% Capaian"] = df_fin_only["% Capaian"].apply(lambda x: f"{x:.1f}%")
+    df_fin_only["ROFI"] = df_fin_only["ROFI"].apply(lambda x: f"{x:.2f}x")
+    render_saas_table(df_fin_only)
 
 # ==============================================================================
-# HALAMAN 3: IKLAN & STRATEGI ADS (RATA-RATA CPR & STANDAR AMAN DONASI 99K)
+# HALAMAN 3: IKLAN & STRATEGI ADS (100% AUTO-PILOT TANPA INPUT MANUAL)
 # ==============================================================================
 elif menu_pilihan == "Iklan & Strategi Ads":
     sp_kpi = db['spend_okt_kpi']
     df_sp = db['spend_okt_df'].copy()
     fm = db['okt_finance_mon']
+    df_har_okt = db.get('okt_harian', pd.DataFrame())
 
     real_okt = float(fm.get('realisasi_finance', 298201574))
     ads_finance_okt = float(fm.get('budget_iklan', 248087884))
     hari_berjalan = max(1, int(fm.get('hari_cutoff', 28)))
-    sisa_hari_okt = max(1, 31 - hari_berjalan)
-    target_yayasan = 500000000.0
-    sisa_target_rp = max(0.0, target_yayasan - real_okt)
-    target_harian_sisa = sisa_target_rp / sisa_hari_okt
-
     spend_sheet_val = float(sp_kpi.get("total_spending", 0.0))
     spend_aktif = spend_sheet_val if spend_sheet_val > 0 else ads_finance_okt
     nom_closing_meta = float(sp_kpi.get("nominal_closing", 205624456.0))
     leads_closing_cnt = int(sp_kpi.get("leads_closing", 1298))
     tot_leads_valid = int(sp_kpi.get("total_leads", 0)) if int(sp_kpi.get("total_leads", 0)) > 0 else int(db.get("tot_leads_valid_okt", 1747))
-    cr_aktual_dec = (db['avg_cr_okt'] / 100.0) if db['avg_cr_okt'] > 0 else 0.743
 
-    # Perhitungan Rata-Rata CPR (Per Lead Masuk & Per Closing) + Standar Aman Donasi Minimal 99K
-    cpr_sheet = float(sp_kpi.get("avg_cpr", 0.0))
-    cpr_aktual_lead = cpr_sheet if cpr_sheet > 0 else (spend_aktif / max(1, tot_leads_valid))
-    cpa_aktual_closing = spend_aktif / max(1, leads_closing_cnt)
+    ap = hitung_autopilot_ads(real_okt, spend_aktif, nom_closing_meta, leads_closing_cnt, tot_leads_valid, db['avg_cr_okt'], hari_berjalan, df_har_okt)
+    cpr_badge = "green" if ap['cpr_aktual'] <= ap['batas_cpr_sehat_99k'] else ("orange" if ap['cpr_aktual'] <= ap['batas_cpr_maks_99k'] else "red")
 
-    # Acuan Paket Donasi Minimal 99K (Rp 99.000) sesuai Spreadsheet Satpam Keuangan:
-    # - Jika ROAS Sehat 2.00x (Beban Iklan Maks 50% dari 99K = Rp 49.500 / closing) -> CPR Lead Aman = Rp 49.500 * CR
-    # - Jika Batas Toleransi Tier 1 (Agar 65% DSD >= Rp 20.000 -> DSD min Rp 30.769 -> Beban Iklan Maks Rp 58.331 / closing) -> CPR Maks = Rp 58.331 * CR
-    donasi_min_99k = 99000.0
-    max_iklan_per_closing_sehat_99k = 49500.0
-    max_iklan_per_closing_tier1_99k = 58331.0
-    batas_cpr_sehat_99k = max_iklan_per_closing_sehat_99k * cr_aktual_dec
-    batas_cpr_maks_99k = max_iklan_per_closing_tier1_99k * cr_aktual_dec
-
-    aov_meta = (nom_closing_meta / leads_closing_cnt) if leads_closing_cnt > 0 else 158416.0
-    roas_meta_real = (nom_closing_meta / spend_aktif) if spend_aktif > 0 else 0.83
-    rofi_total_real = (real_okt / spend_aktif) if spend_aktif > 0 else 1.20
-    avg_spend_harian = spend_aktif / hari_berjalan
-
-    cpr_aman_status = "AMAN (< Batas 99K)" if cpr_aktual_lead <= batas_cpr_maks_99k else "TINGGI (> Batas 99K)"
-    cpr_badge_col = "green" if cpr_aktual_lead <= batas_cpr_sehat_99k else ("orange" if cpr_aktual_lead <= batas_cpr_maks_99k else "red")
-
+    render_html('<div class="section-divider"><i class="ri-advertisement-line" style="color:#6366F1!important;"></i> 1. INDIKATOR UTAMA IKLAN & EVALUASI RATA-RATA CPR TERHADAP DONASI MINIMAL 99K</div>')
     a1, a2, a3, a4 = st.columns(4)
     with a1:
-        lbl_sp_sub = "Dari Sheet Spend Okt" if spend_sheet_val > 0 else f"Sheet Spend: Rp 0 • Finance: {rp_short(ads_finance_okt)}"
-        render_bento_kpi("ri-funds-box-line", "indigo", "Total Spending Iklan (Okt)", rp_short(spend_aktif), f"Avg: {rp_short(avg_spend_harian)}/hr", "indigo", lbl_sp_sub)
+        render_bento_kpi("ri-funds-box-line", "indigo", "Total Spending Iklan (Okt)", rp_short(spend_aktif), f"Avg: {rp_short(ap['avg_spend_harian'])}/hr", "indigo", f"Nominal Meta: {rp_short(nom_closing_meta)}")
     with a2:
-        render_bento_kpi("ri-price-tag-3-line", "rose", "Rata-Rata CPR (Cost Per Lead)", rp(cpr_aktual_lead), cpr_aman_status, cpr_badge_col, f"Batas Aman 99K: {rp(batas_cpr_sehat_99k)}")
+        render_bento_kpi("ri-price-tag-3-line", "rose", "Rata-Rata CPR (Cost Per Lead)", rp(ap['cpr_aktual']), f"Batas Aman 99K: {rp(ap['batas_cpr_sehat_99k'])}", cpr_badge, f"Toleransi Maks 99K: {rp(ap['batas_cpr_maks_99k'])}")
     with a3:
-        render_bento_kpi("ri-shopping-cart-check-line", "emerald", "Leads Closing & AOV Meta", f"{leads_closing_cnt:,} Closing".replace(",", "."), f"AOV: {rp(aov_meta)}", "green", f"Cost/Closing: {rp(cpa_aktual_closing)}")
+        render_bento_kpi("ri-shopping-cart-check-line", "emerald", "Leads Closing & Cost/Closing", f"{leads_closing_cnt:,} Closing".replace(",", "."), f"Cost/Closing: {rp(ap['cpa_closing'])}", "green", f"AOV Meta: {rp(ap['aov_meta'])}")
     with a4:
-        render_bento_kpi("ri-compass-discover-line", "orange", "ROAS Meta & ROFI Finance", f"ROAS {roas_meta_real:.2f}x | ROFI {rofi_total_real:.2f}x", "Standar Sehat: >= 2.00x", "red" if rofi_total_real < 2.0 else "green", f"Nominal Meta: {rp_short(nom_closing_meta)}")
+        render_bento_kpi("ri-rocket-2-line", "orange", "Keputusan Budget Hari Ini (Auto)", rp_short(ap['rekom_budget_hari_ini']), ap['mode_keputusan'], ap['badge_keputusan'], f"ROAS Meta {ap['roas_meta']:.2f}x | ROFI {ap['rofi_fin']:.2f}x")
 
-    st_left, st_right = st.columns([1.15, 1.65])
-    with st_left:
+    render_html('<div class="section-divider"><i class="ri-cpu-line" style="color:#10B981!important;"></i> 2. KEPUTUSAN OTOMATIS HARI INI & STRATEGI PENGAMANAN ROAS / CPR 99K</div>')
+    ad_l, ad_r = st.columns([1.4, 1.4])
+    with ad_l:
+        st1 = step_item_html("1. Rekomendasi Gas Budget Iklan Hari Ini (Otomatis)", ap['alasan_utama'], rp(ap['rekom_budget_hari_ini']), "#6366F1")
+        st2 = step_item_html("2. Batas Maksimal CPR Hari Ini (Acuan Donasi Minimal Rp 99.000)", f"Agar ROAS Sehat 2,00x pada donasi 99K (Toleransi maks HPP 20rb: {rp(ap['batas_cpr_maks_99k'])}/lead)", f"<= {rp(ap['batas_cpr_sehat_99k'])} / lead", "#10B981")
+        st3 = step_item_html(f"3. Target Minimal Leads & Closing Hari Ini (CR {db['avg_cr_okt']:.1f}%)", f"Target Donasi Harian agar ROAS 2,00x: {rp(ap['target_donasi_hari_ini_2x'])}", f"{ap['target_leads_hari_ini']} Leads → {ap['target_closing_hari_ini']} Closing", "#F97316")
+        st4 = step_item_html("4. Target Subsidi CRM / Repeat Order Hari Ini", f"Estimasi perolehan iklan Meta hari ini: {rp(ap['est_donasi_meta_hari_ini'])} (Sisanya wajib ditutup CRM)", rp(ap['wajib_subsidi_crm_hari_ini']), "#EF4444", is_last=True)
+        render_html(f'<div class="bento-card" style="min-height:365px;"><div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;"><span style="font-family:\'Outfit\',sans-serif!important;font-weight:800;font-size:15px;"><i class="ri-robot-2-fill" style="color:#6366F1!important;"></i> Komando Budget & Target Harian Otomatis</span><span class="badge-pill bp-{ap["badge_keputusan"]}">{ap["mode_keputusan"]}</span></div>{st1}{st2}{st3}{st4}</div></div>')
+
+    with ad_r:
         render_html(f"""
-        <div class="bento-card" style="margin-bottom:10px;">
-            <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;margin-bottom:6px;">
-                <i class="ri-rocket-2-fill" style="color:#FF6B4A!important;"></i> Komando Gas Budget & Standar CPR 99K
-            </div>
-            <div style="font-size:11.8px;color:var(--text-secondary)!important;line-height:1.5;">
-                <b>Patokan CPR dari Minimal Donasi Rp 99.000 (CR {db['avg_cr_okt']:.1f}%):</b><br>
-                • <b>CPR Sehat (ROAS 2,00x @ 99K):</b> Maks <b>{rp(batas_cpr_sehat_99k)} / lead</b> (Biaya iklan Rp 49.500/closing).<br>
-                • <b>CPR Toleransi Tier 1 (HPP 20rb @ 99K):</b> Maks <b>{rp(batas_cpr_maks_99k)} / lead</b> (Agar 65% DSD tetap menutup HPP Rp 20rb tanpa potong cashback).<br>
-                • <b>CPR Aktual Saat Ini:</b> <b style="color:#EF4444!important;">{rp(cpr_aktual_lead)} / lead</b> ({rp(cpa_aktual_closing)} / closing).
-            </div>
-        </div>
-        """)
-        mode_gas = st.selectbox(
-            "1. Pilih Mode Strategi Gas Budget Hari Ini:",
-            [
-                f"Mode Efisiensi CPR & ROAS Aman — Gas {rp(nom_closing_meta / hari_berjalan / 1.15)} / hari",
-                f"Mode Stabil / Normal — Gas {rp(avg_spend_harian)} / hari (Sesuai Rata-rata Berjalan)",
-                f"Mode Agresif Kejar Target — Gas {rp(min(15000000.0, target_harian_sisa / 2.0))} / hari",
-                "Custom Manual — Ketik Sendiri Rencana Budget Hari Ini"
-            ],
-            key="ads_gas_mode"
-        )
-        if mode_gas.startswith("Mode Efisiensi"): def_b = int(round((nom_closing_meta / hari_berjalan) / 1.15, -4))
-        elif mode_gas.startswith("Mode Stabil"): def_b = int(round(avg_spend_harian, -4))
-        elif mode_gas.startswith("Mode Agresif"): def_b = int(round(min(15000000.0, target_harian_sisa / 2.0), -4))
-        else: def_b = 8000000
-
-        budget_hari_ini = st.number_input("2. Nominal Gas Budget Iklan Hari Ini (Rp):", min_value=500000, max_value=50000000, value=max(500000, def_b), step=500000, key="ads_budget_today")
-
-        target_donasi_roas2 = budget_hari_ini * 2.00
-        min_leads_cpr_sehat = max(1, int(np.ceil(budget_hari_ini / batas_cpr_sehat_99k)))
-        min_closing_99k_sehat = max(1, int(np.ceil(budget_hari_ini / max_iklan_per_closing_sehat_99k)))
-        est_omset_meta_hari_ini = budget_hari_ini * roas_meta_real
-        wajib_subsidi_crm_hari_ini = max(0.0, target_donasi_roas2 - est_omset_meta_hari_ini)
-
-    with st_right:
-        render_html(f"""
-        <div class="bento-card" style="min-height:360px;display:flex;flex-direction:column;justify-content:space-between;">
+        <div class="bento-card" style="min-height:365px;display:flex;flex-direction:column;justify-content:space-between;">
             <div>
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
-                    <span style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:15px;"><i class="ri-compass-3-fill" style="color:#10B981!important;"></i> Keputusan Strategi Hari Ini (Budget: {rp(budget_hari_ini)})</span>
-                    <span class="badge-pill bp-{cpr_badge_col}">CPR Aktual: {rp(cpr_aktual_lead)}</span>
+                    <span style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:15px;"><i class="ri-lightbulb-flash-fill" style="color:#F59E0B!important;"></i> Analisis CPR 99K & Instruksi Taktis Hari Ini</span>
+                    <span class="badge-pill bp-indigo">Auto-Diagnostic</span>
                 </div>
-                <div class="satpam-step" style="border-left:4px solid #6366F1;">
-                    <div>
-                        <div style="font-size:12px;font-weight:700;">1. Target Donasi Harian Agar ROAS Sehat 2,00x (Pedoman No.5)</div>
-                        <div style="font-size:10.5px;color:var(--text-muted)!important;">Beban iklan maksimal 50% dari donasi masuk hari ini</div>
-                    </div>
-                    <div class="satpam-val" style="color:#6366F1!important;">{rp(target_donasi_roas2)}</div>
+                <div class="sub-box" style="padding:11px 14px;border-radius:12px;margin-bottom:9px;font-size:12px;line-height:1.55;">
+                    <b>🔍 Mengapa CPR Harus Diukur Terhadap Donasi Minimal 99K (Rp 99.000)?</b><br>
+                    • Pada donasi 1 mushaf (<b>Rp 99.000</b>), potongan operasional 10% adalah <b>Rp 9.900</b>.<br>
+                    • Agar mencapai <b>Standar ROAS Sehat 2,00x</b> (biaya iklan maks 50% = <b>Rp 49.500/closing</b>), maka dengan CR CS <b>{db['avg_cr_okt']:.1f}%</b>, biaya per lead (CPR) tidak boleh melebihi <b>{rp(ap['batas_cpr_sehat_99k'])}</b>.<br>
+                    • Saat ini rata-rata CPR Anda berada di <b>{rp(ap['cpr_aktual'])}/lead</b> (setara <b>{rp(ap['cpa_closing'])}/closing</b>). Jika donatur hanya berdonasi Rp 99.000, maka sisa DSD hanya <b>{rp(99000 - 9900 - ap['cpa_closing'])}</b>.
                 </div>
-                <div class="satpam-step" style="border-left:4px solid #10B981;">
-                    <div>
-                        <div style="font-size:12px;font-weight:700;">2. Target Leads & Closing Harian (Agar CPR Aman di Donasi 99K)</div>
-                        <div style="font-size:10.5px;color:var(--text-muted)!important;">Wajib menjaga CPR <= <b>{rp(batas_cpr_sehat_99k)}/lead</b> (Maks toleransi <b>{rp(batas_cpr_maks_99k)}</b>)</div>
-                    </div>
-                    <div class="satpam-val" style="color:#10B981!important;">Min {min_leads_cpr_sehat} Leads → {min_closing_99k_sehat} Closing</div>
-                </div>
-                <div class="satpam-step" style="border-left:4px solid #EF4444;">
-                    <div>
-                        <div style="font-size:12px;font-weight:700;">3. Target Subsidi CRM CS Hari Ini (Pedoman No.6)</div>
-                        <div style="font-size:10.5px;color:var(--text-muted)!important;">Karena CPR aktual {rp(cpr_aktual_lead)} masih di atas batas 99K ({rp(batas_cpr_sehat_99k)}), wajib subsidi CRM</div>
-                    </div>
-                    <div class="satpam-val" style="color:#EF4444!important;">{rp(wajib_subsidi_crm_hari_ini)}</div>
-                </div>
-                <div class="sub-box" style="padding:10px 13px;border-radius:12px;font-size:11.6px;line-height:1.5;">
-                    <b>🎯 Rekomendasi Keputusan Berbasis CPR & Donasi 99K:</b><br>
-                    1. <b>Evaluasi CPR vs 99K:</b> Saat ini rata-rata CPR (<b>{rp(cpr_aktual_lead)}</b>) melebihi batas aman donasi tunggal Rp 99.000 (<b>{rp(batas_cpr_maks_99k)}</b>). Artinya jika donatur hanya berdonasi 1 mushaf (Rp 99rb), saldo 65% DSD akan defisit.<br>
-                    2. <b>Aturan Cut-Off AdSet Siang Hari:</b> Matikan kampanye/AdSet yang pada pukul 12.00 WIB memiliki <b>CPR > {rp(batas_cpr_maks_99k)}</b> dan belum menghasilkan closing.<br>
-                    3. <b>Kunci AOV Minimal 2 Mushaf (Rp 198.000):</b> Selama CPR berada di kisaran {rp(cpr_aktual_lead)}, CS wajib mengarahkan donatur mengambil paket minimal 2 mushaf (Rp 198rb) agar dengan CPR tersebut ROAS langsung melompat ke atas <b>1,80x–2,00x</b>.
+                <div class="sub-box" style="padding:11px 14px;border-radius:12px;font-size:12px;line-height:1.55;">
+                    <b>⚡ 3 Langkah Eksekusi Wajib Hari Ini:</b><br>
+                    1. <b>Aturan Matikan AdSet (Cut-Off CPR):</b> Evaluasi iklan pukul 12.00 WIB; matikan AdSet yang memiliki <b>CPR > {rp(ap['batas_cpr_maks_99k'])}</b> dan belum menghasilkan closing.<br>
+                    2. <b>Kunci Paket Bundling Minimal {ap['min_paket_mushaf']} Mushaf ({rp(ap['min_paket_mushaf']*99000)}):</b> Dengan biaya per closing saat ini ({rp(ap['cpa_closing'])}), CS wajib mengarahkan donatur mengambil minimal <b>{ap['min_paket_mushaf']} Mushaf</b> agar ROAS otomatis naik ke <b>>= 2,00x</b>.<br>
+                    3. <b>Kuota Harian CRM CS:</b> Tim CS & CRM wajib menyumbang minimal <b>{rp(ap['wajib_subsidi_crm_hari_ini'])}</b> hari ini dari *follow-up* donatur lama untuk mengamankan Saldo Pembelian Mushaf 65%.
                 </div>
             </div>
         </div>
@@ -1468,7 +1363,7 @@ elif menu_pilihan == "Iklan & Strategi Ads":
     apply_saas_plotly(fig_sp, height=280, is_currency=True)
     st.plotly_chart(fig_sp, use_container_width=True)
 
-    render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;margin:6px 0;"><i class="ri-table-2" style="color:#6366F1!important;"></i> Tabel Harian Sheet DATA SPEND OKTOBER (Terhubung Real-Time ke Spreadsheet)</div>')
+    render_html('<div class="section-divider"><i class="ri-table-2" style="color:#6366F1!important;"></i> TABEL HARIAN SHEET DATA SPEND OKTOBER (OTOMATIS SINKRON SAAT DIISI)</div>')
     df_sp_disp = df_sp.copy()
     if not df_sp_disp.empty:
         df_sp_disp["Spending (Rp)"] = df_sp_disp["Spending (Rp)"].apply(rp)
@@ -1478,15 +1373,16 @@ elif menu_pilihan == "Iklan & Strategi Ads":
     render_saas_table(df_sp_disp)
 
 # ==============================================================================
-# HALAMAN 4: PERFORMA CS & LEADS
+# HALAMAN 4: PERFORMA CS & LEADS (LENGKAP DENGAN TABEL KOMPARASI & SUMBER KONTAK)
 # ==============================================================================
 elif menu_pilihan == "Performa CS & Leads":
     mode_evaluasi_cs = st.radio(
-        "Pilih Mode Evaluasi Kinerja CS:",
+        "Pilih Mode Evaluasi Kinerja CS & Leads:",
         [
-            "1. Rekapitulasi Pendapatan Harian per CS (Format Dashboard CS + Kolom CR Harian)",
-            "2. Monitoring Leads & Conversion Rate (CR) per Kampanye (SantriQu, AmalQu, JariyahQu)",
-            "3. Rapor & Rekap Omzet Bulanan Seluruh CS (Januari – Oktober 2026)"
+            "1. Rekapitulasi Pendapatan Harian per CS (Leads Meta vs CRM + CR Harian)",
+            "2. Tabel Komparasi Kinerja CS Oktober & Analisis Sumber Kontak",
+            "3. Monitoring Leads & Conversion Rate (CR) per Kampanye (SantriQu, AmalQu, JariyahQu)",
+            "4. Rapor & Rekap Omzet Bulanan Seluruh CS (Januari – Oktober 2026)"
         ],
         horizontal=True, key="cs_eval_mode"
     )
@@ -1498,15 +1394,31 @@ elif menu_pilihan == "Performa CS & Leads":
         sum_gab = df_d_okt['Total_Gabungan'].sum() if not df_d_okt.empty else 0
 
         k1, k2, k3, k4 = st.columns(4)
-        with k1: render_bento_kpi("ri-advertisement-line", "indigo", "Total Leads Meta (Okt)", rp_short(sum_leads), "82,4% Porsi Donasi", "indigo", f"Rp {sum_leads:,.0f}".replace(",", "."))
-        with k2: render_bento_kpi("ri-repeat-2-line", "emerald", "Total CRM (Repeat Order)", rp_short(sum_crm), "17,6% Porsi Gabungan", "green", f"Rp {sum_crm:,.0f}".replace(",", "."))
-        with k3: render_bento_kpi("ri-funds-box-line", "orange", "Total Gabungan CS (Okt)", rp_short(sum_gab), f"Final: {rp_short(db['okt_kpi']['donasi_final'])}", "orange", f"Rp {sum_gab:,.0f}".replace(",", "."))
+        with k1: render_bento_kpi("ri-advertisement-line", "indigo", "Total Leads Meta (Okt)", rp_short(sum_leads), "82,4% Porsi Donasi", "indigo", rp(sum_leads))
+        with k2: render_bento_kpi("ri-repeat-2-line", "emerald", "Total CRM (Repeat Order)", rp_short(sum_crm), "17,6% Porsi Gabungan", "green", rp(sum_crm))
+        with k3: render_bento_kpi("ri-funds-box-line", "orange", "Total Gabungan CS (Okt)", rp_short(sum_gab), f"Final: {rp_short(db['okt_kpi']['donasi_final'])}", "orange", rp(sum_gab))
         with k4: render_bento_kpi("ri-percent-line", "emerald", "Rata-Rata CR Bulanan", f"{db['avg_cr_okt']:.1f}%", "Dari Sheet CR/Leads", "green", f"{len(db['leads_okt'])} Baris CR Aktif")
 
-        render_html('<div style="font-family:\'Outfit\',sans-serif!important;font-size:15.5px;font-weight:700;margin:6px 0;"><i class="ri-table-2" style="color:#FF6B4A!important;"></i> Rekapitulasi Pendapatan Harian per CS (Leads Meta vs CRM) + Kolom CR Harian</div>')
         render_rekap_harian_cs_table(df_d_okt, db['avg_cr_okt'])
 
     elif mode_evaluasi_cs.startswith("2."):
+        render_html('<div class="section-divider"><i class="ri-user-star-line" style="color:#6366F1!important;"></i> TABEL KOMPARASI KINERJA PENDAPATAN PER CS (TOTAL vs FINAL TERVERIFIKASI)</div>')
+        df_ok = db['okt_cs_table'].copy()
+        for cr in ['Harian (Total)', 'Harian (Final)', 'Mingguan (Total)', 'Mingguan (Final)', 'Bulanan (Total)', 'Bulanan (Final)', 'Target (Rp)', 'Sisa Target', 'Pending Verifikasi', 'Target Harian (Sisa)']:
+            if cr in df_ok.columns: df_ok[cr] = df_ok[cr].apply(rp)
+        render_saas_table(df_ok)
+
+        render_html('<div class="section-divider"><i class="ri-pie-chart-2-line" style="color:#10B981!important;"></i> ANALISIS DISTRIBUSI PENDAPATAN BERDASARKAN SUMBER KONTAK & RASIO KANAL</div>')
+        col_s1, col_s2 = st.columns([1.3, 1])
+        with col_s1:
+            df_sr = db['okt_sumber'].copy()
+            for cr in ['Leads Meta', 'Repeat Order CRM', 'Repeat Order non CRM', 'Lainnya', 'Total Nominal']:
+                if cr in df_sr.columns: df_sr[cr] = df_sr[cr].apply(rp)
+            render_saas_table(df_sr)
+        with col_s2:
+            render_saas_table(db['okt_kanal_rasio'])
+
+    elif mode_evaluasi_cs.startswith("3."):
         df_l = db['leads_okt'].copy()
         df_l['DT'] = pd.to_datetime(df_l['Tanggal'], errors='coerce').dt.date
         df_l = df_l.dropna(subset=['DT'])
@@ -1585,7 +1497,7 @@ elif menu_pilihan == "Performa CS & Leads":
 # HALAMAN 5: LOGISTIK & GUDANG (PEMISAHAN META LP, TIKTOK, TAHSIN & DEFISIT META LP)
 # ==============================================================================
 elif menu_pilihan == "Logistik & Gudang":
-    # Baris 1: Tampilkan Terpisah Meta LP vs Mushaf TikTok vs Buku Tahsin (Siap & Belum Siap)
+    render_html('<div class="section-divider"><i class="ri-archive-drawer-line" style="color:#6366F1!important;"></i> 1. PEMISAHAN STOK PER KATEGORI: MUSHAF META LP vs MUSHAF TIKTOK vs BUKU TAHSIN</div>')
     s1, s2, s3 = st.columns(3)
     with s1:
         render_bento_kpi("ri-book-mark-line", "indigo", "1. Mushaf Meta LP (ST & Al-Wakaf)", f"{sa['meta_lp_total']:,} Pcs".replace(",", "."), f"Siap: {sa['meta_lp_siap']:,} • Belum: {sa['meta_lp_belum']} Pcs".replace(",", "."), "indigo", f"ST: {sa['st_total']} | AW Meta: {sa['aw_meta_total']:,}".replace(",", "."))
@@ -1594,7 +1506,7 @@ elif menu_pilihan == "Logistik & Gudang":
     with s3:
         render_bento_kpi("ri-book-open-line", "orange", "3. Buku Belajar Super Tahsin", f"{sa['buku_tahsin_total']:,} Pcs".replace(",", "."), f"Siap: {sa['buku_tahsin_siap']:,} • Belum: {sa['buku_tahsin_belum']} Pcs".replace(",", "."), "green", "Inventaris Buku Tahsin TikTok")
 
-    # Baris 2: Kekurangan Murni dari Meta LP + Perbandingan Distribusi vs (Meta LP + TikTok)
+    render_html('<div class="section-divider"><i class="ri-alarm-warning-line" style="color:#EF4444!important;"></i> 2. KEKURANGAN PENGADAAN MUSHAF META LP & PERBANDINGAN DISTRIBUSI</div>')
     s4, s5, s6 = st.columns(3)
     with s4:
         render_bento_kpi("ri-calendar-todo-line", "indigo", "Total Kebutuhan Distribusi (Agust–Okt)", f"{sa['kebutuhan_agust_okt']:,} Mushaf".replace(",", "."), f"Agust: {sa['keb_agust']} • Sept: {sa['keb_sept']:,} • Okt: {sa['kebutuhan_okt']:,}".replace(",", "."), "orange", f"Sisa Gap Distribusi: {sa['gap_agust_okt']:,} Pcs".replace(",", "."))
@@ -1652,7 +1564,7 @@ elif menu_pilihan == "Logistik & Gudang":
         st.plotly_chart(fig_pk, use_container_width=True)
 
 # ==============================================================================
-# HALAMAN 6: KALENDER DISTRIBUSI (HIJAU JIKA [SUCCESS] & KEBUTUHAN VS STOK)
+# HALAMAN 6: KALENDER DISTRIBUSI
 # ==============================================================================
 elif menu_pilihan == "Kalender Distribusi":
     df_kal = db['kalender_okt'].copy()
