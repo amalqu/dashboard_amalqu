@@ -3,33 +3,47 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import re, io, json, datetime, time, urllib.request
+import os, re, io, json, datetime, time, urllib.request
 from datetime import timezone, timedelta
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# ==============================================================================
+# 1. KONFIGURASI HALAMAN, FIREBASE URL, ZONA WAKTU WIB (UTC+7) & STATE
+# ==============================================================================
 st.set_page_config(
     page_title="AmalQu — Yayasan AmalQu Indonesia Peduli",
     page_icon="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/icons/Finance/funds-box-fill.svg",
-    layout="wide", initial_sidebar_state="expanded"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 FIREBASE_BASE_URL = "https://amalqu-dashboard-default-rtdb.asia-southeast1.firebasedatabase.app"
 TZ_WIB = timezone(timedelta(hours=7))
-def now_wib(): return datetime.datetime.now(TZ_WIB)
 
-for k, v in [("dark_mode", True), ("auth_user", None), ("sync_nonce", 0)]:
-    if k not in st.session_state: st.session_state[k] = v
+def now_wib():
+    return datetime.datetime.now(TZ_WIB)
+
+if "dark_mode" not in st.session_state: st.session_state.dark_mode = True
+if "auth_user" not in st.session_state: st.session_state.auth_user = None
+if "sync_nonce" not in st.session_state: st.session_state.sync_nonce = 0
 
 def render_html(raw_html: str):
     st.markdown(" ".join(line.strip() for line in raw_html.splitlines() if line.strip()), unsafe_allow_html=True)
 
-def build_logo_html(sz=42):
-    return (f'<div style="display:inline-flex;align-items:center;justify-content:center;width:{sz}px;height:{sz}px;border-radius:12px;'
-            f'background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%);box-shadow:0 4px 14px rgba(249,115,22,0.3);flex-shrink:0;">'
-            f'<svg width="{int(sz*0.56)}" height="{int(sz*0.56)}" viewBox="0 0 24 24" fill="none">'
-            f'<path d="M12 2L3 7V12C3 17.55 6.84 22.74 12 24C17.16 22.74 21 17.55 21 12V7L12 2ZM12 6.5C13.93 6.5 15.5 8.07 15.5 10C15.5 11.93 13.93 13.5 12 13.5C10.07 13.5 8.5 11.93 8.5 10C8.5 8.07 10.07 6.5 12 6.5ZM18 17.5C16.5 19.3 14.3 20.5 12 20.5C9.7 20.5 7.5 19.3 6 17.5C6.5 15.8 9.8 14.8 12 14.8C14.2 14.8 17.5 15.8 18 17.5Z" fill="white"/></svg></div>')
+def build_logo_html(size_px=44):
+    return (
+        f'<div style="position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;">'
+        f'<div style="width:{size_px}px;height:{size_px}px;border-radius:12px;background:linear-gradient(135deg,#FF6B4A 0%,#F97316 100%);'
+        f'display:inline-flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(249,115,22,0.3);">'
+        f'<svg width="{int(size_px*0.56)}" height="{int(size_px*0.56)}" viewBox="0 0 24 24" fill="none">'
+        f'<path d="M12 2L3 7V12C3 17.55 6.84 22.74 12 24C17.16 22.74 21 17.55 21 12V7L12 2ZM12 6.5C13.93 6.5 15.5 8.07 15.5 10C15.5 11.93 13.93 13.5 12 13.5C10.07 13.5 8.5 11.93 8.5 10C8.5 8.07 10.07 6.5 12 6.5ZM18 17.5C16.5 19.3 14.3 20.5 12 20.5C9.7 20.5 7.5 19.3 6 17.5C6.5 15.8 9.8 14.8 12 14.8C14.2 14.8 17.5 15.8 18 17.5Z" fill="white"/>'
+        f'</svg></div></div>'
+    )
 
+# ==============================================================================
+# 2. HELPER FORMATTING, RUMUS SATPAM, AUTO-PILOT ADS & ENGINE TAB ANALISA
+# ==============================================================================
 def rp(val):
     try:
         v = float(val)
@@ -45,11 +59,22 @@ def rp_dash(val):
 def rp_short(val):
     try:
         v = float(val)
-        s, av = ("-" if v < 0 else ""), abs(v)
-        if av >= 1e9: return f"{s}Rp {av/1e9:.2f} M"
-        if av >= 1e6: return f"{s}Rp {av/1e6:.1f} Jt"
-        return f"{s}Rp {av:,.0f}".replace(",", ".")
+        sign, av = ("-" if v < 0 else ""), abs(v)
+        if av >= 1_000_000_000: return f"{sign}Rp {av/1_000_000_000:.2f} M"
+        if av >= 1_000_000: return f"{sign}Rp {av/1_000_000:.1f} Jt"
+        return f"{sign}Rp {av:,.0f}".replace(",", ".")
     except: return "Rp 0"
+
+def pct_delta_info(curr_val, prev_val):
+    c, p = float(curr_val or 0.0), float(prev_val or 0.0)
+    diff = c - p
+    if p <= 0:
+        pct = 100.0 if c > 0 else 0.0
+    else:
+        pct = (diff / p) * 100.0
+    sign = "+" if pct > 0 else ""
+    theme = "green" if pct > 0 else ("red" if pct < 0 else "indigo")
+    return f"{sign}{pct:.1f}%", diff, pct, theme
 
 def num_clean(val):
     if pd.isna(val): return 0.0
@@ -57,17 +82,18 @@ def num_clean(val):
     s = str(val).strip()
     if not s or s in ["-", "None", "nan", "#REF!", "#VALUE!", "#DIV/0!", "#ERROR!", "#N/A"]: return 0.0
     is_neg = (s.startswith("(") and s.endswith(")")) or s.startswith("-")
-    sc = re.sub(r'[^0-9.,]', '', s)
-    if not sc: return 0.0
-    if '.' in sc and ',' in sc:
-        sc = sc.replace('.', '').replace(',', '.') if sc.rfind(',') > sc.rfind('.') else sc.replace(',', '')
-    elif ',' in sc:
-        pts = sc.split(',')
-        sc = sc.replace(',', '.') if (len(pts) == 2 and len(pts[-1]) <= 2) else sc.replace(',', '')
-    elif '.' in sc:
-        if re.match(r'^\d{1,3}(\.\d{3})+$', sc) or sc.count('.') > 1: sc = sc.replace('.', '')
+    s_clean = re.sub(r'[^0-9.,]', '', s)
+    if not s_clean: return 0.0
+    if '.' in s_clean and ',' in s_clean:
+        s_clean = s_clean.replace('.', '').replace(',', '.') if s_clean.rfind(',') > s_clean.rfind('.') else s_clean.replace(',', '')
+    elif ',' in s_clean:
+        parts = s_clean.split(',')
+        s_clean = s_clean.replace(',', '.') if (len(parts) == 2 and len(parts[-1]) <= 2) else s_clean.replace(',', '')
+    elif '.' in s_clean:
+        if re.match(r'^\d{1,3}(\.\d{3})+$', s_clean) or s_clean.count('.') > 1:
+            s_clean = s_clean.replace('.', '')
     try:
-        res = float(sc)
+        res = float(s_clean)
         return -abs(res) if is_neg else res
     except: return 0.0
 
@@ -75,10 +101,18 @@ def clamp_date(dt_val, min_d, max_d):
     if not isinstance(dt_val, datetime.date): return max_d
     return max(min_d, min(dt_val, max_d))
 
-# ==============================================================================
-# 2. RUMUS BAKU SATPAM KEUANGAN & AUTO-PILOT SMART ADS ADVISOR
-# ==============================================================================
 def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000.0, leads_meta_val=None, mode_kebutuhan="meta_lp"):
+    """
+    Rumus Baku Spreadsheet Satpam Keuangan:
+    1. Total Donasi Masuk (100%)
+    2. Biaya Iklan Terpakai (Meta Ads)
+    3. Profit Iklan Yayasan = Total Donasi - Biaya Iklan
+    4. Beban Operasional Yayasan (10%) = 10% x Total Donasi Masuk
+    5. Donasi Siap Disalurkan (DSD) = Profit Iklan - Beban Operasional 10%
+    6. Saldo Pembelian Mushaf (65% DSD) = 65% x DSD
+    7. Saldo Cashback Awal (35% DSD) = 35% x DSD
+    8. Total Alokasi Terserap = Budget 65% + Cashback 35% = 100% DSD
+    """
     donasi, iklan, hpp = float(donasi_masuk or 0.0), float(biaya_iklan or 0.0), float(hpp_unit or 20000.0)
     rofi_real = (donasi / iklan) if iklan > 0 else 0.0
     roas_meta = (float(leads_meta_val) / iklan) if (iklan > 0 and leads_meta_val and float(leads_meta_val) > 0) else (rofi_real * 0.72)
@@ -99,19 +133,25 @@ def hitung_satpam_spreadsheet(donasi_masuk, biaya_iklan, sa_dict, hpp_unit=20000
     keb_okt_total = int(sa_dict.get("kebutuhan_okt", 1818))
 
     if mode_kebutuhan == "okt_sisa":
-        jml_mushaf, lbl_kebutuhan = keb_okt_sisa, f"{keb_okt_sisa:,} Mushaf (Sisa Kebutuhan Oktober)".replace(",", ".")
+        jml_mushaf = keb_okt_sisa
+        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Sisa Kebutuhan Bulan Oktober)".replace(",", ".")
     elif mode_kebutuhan == "okt_total":
-        jml_mushaf, lbl_kebutuhan = keb_okt_total, f"{keb_okt_total:,} Mushaf (Total Kebutuhan Oktober)".replace(",", ".")
+        jml_mushaf = keb_okt_total
+        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Total Kebutuhan Bulan Oktober)".replace(",", ".")
     else:
-        jml_mushaf, lbl_kebutuhan = keb_meta_lp_kurang, f"{keb_meta_lp_kurang:,} Mushaf (Kekurangan Meta LP)".replace(",", ".")
+        jml_mushaf = keb_meta_lp_kurang
+        lbl_kebutuhan = f"{jml_mushaf:,} Mushaf (Kekurangan Meta LP: Kebutuhan {sa_dict.get('kebutuhan_agust_okt',5021):,} - Meta LP {sa_dict.get('meta_lp_total',3074):,})".replace(",", ".")
 
     biaya_beli_mushaf = jml_mushaf * hpp
     selisih_saldo_beli = saldo_beli_mushaf_65 - biaya_beli_mushaf
 
     if selisih_saldo_beli >= 0:
-        kekurangan_saldo_beli, surplus_saldo_beli, potong_dari_cashback = 0.0, selisih_saldo_beli, 0.0
+        kekurangan_saldo_beli = 0.0
+        surplus_saldo_beli = selisih_saldo_beli
+        potong_dari_cashback = 0.0
     else:
-        kekurangan_saldo_beli, surplus_saldo_beli = abs(selisih_saldo_beli), 0.0
+        kekurangan_saldo_beli = abs(selisih_saldo_beli)
+        surplus_saldo_beli = 0.0
         potong_dari_cashback = min(max(0.0, saldo_cashback_awal_35), kekurangan_saldo_beli)
 
     cashback_akhir = max(0.0, saldo_cashback_awal_35 - kekurangan_saldo_beli) + surplus_saldo_beli
@@ -157,14 +197,12 @@ def hitung_autopilot_ads(real_okt, spend_aktif, nom_closing_meta, leads_closing_
 
     cpr_aktual = spend_aktif / max(1, tot_leads_valid)
     cpa_closing = spend_aktif / max(1, leads_closing_cnt)
-
-    # Standar Aman CPR terhadap Paket Donasi Minimal Rp 99.000 (99K)
     batas_cpr_sehat_99k = 49500.0 * cr_dec
     batas_cpr_maks_99k = 58331.0 * cr_dec
 
     if rofi_fin >= 2.0 and cpr_aktual <= batas_cpr_sehat_99k:
         mode_keputusan, badge_keputusan, faktor_kali = "SCALE UP OTOMATIS (+20% BUDGET)", "green", 1.20
-        alasan_utama = f"ROFI Finance ({rofi_fin:.2f}x) sudah >= 2,00x dan CPR ({rp(cpr_aktual)}) aman di bawah batas donasi 99K ({rp(batas_cpr_sehat_99k)})."
+        alasan_utama = f"ROFI Finance ({rofi_fin:.2f}x) >= 2,00x dan CPR ({rp(cpr_aktual)}) aman di bawah batas donasi 99K ({rp(batas_cpr_sehat_99k)})."
     elif rofi_fin >= 1.50 or cpr_aktual <= batas_cpr_maks_99k:
         mode_keputusan, badge_keputusan, faktor_kali = "TAHAN BUDGET STABIL (100% RATA-RATA)", "orange", 1.00
         alasan_utama = f"ROFI ({rofi_fin:.2f}x) cukup menutup HPP dasar, namun CPR ({rp(cpr_aktual)}) mendekati batas toleransi donasi 99K ({rp(batas_cpr_maks_99k)})."
@@ -192,15 +230,66 @@ def hitung_autopilot_ads(real_okt, spend_aktif, nom_closing_meta, leads_closing_
         "min_paket_mushaf": min_paket_mushaf, "aov_meta": aov_meta, "roas_meta": roas_meta, "rofi_fin": rofi_fin
     }
 
+def hitung_analisa_wow_mom(df_har, df_macro, df_cs_ov, fm_okt):
+    """Engine Tab Analisa: Menghitung Perbandingan Mingguan (WoW) & Bulanan (MoM) + Kesimpulan Diagnosa."""
+    out = {"weeks_df": pd.DataFrame(), "months_df": df_macro.copy()}
+    if df_har is None or df_har.empty:
+        return out
+
+    df_w = df_har[df_har["Total_Gabungan"] > 0].copy()
+    df_w["DayNum"] = df_w["Tanggal"].apply(lambda s: int(str(s).split("-")[-1]) if "-" in str(s) and str(s).split("-")[-1].isdigit() else 1)
+    def assign_pekan(d):
+        if d <= 7: return "Pekan 1 (1–7 Okt)"
+        elif d <= 14: return "Pekan 2 (8–14 Okt)"
+        elif d <= 21: return "Pekan 3 (15–21 Okt)"
+        elif d <= 28: return "Pekan 4 (22–28 Okt)"
+        else: return "Pekan 5 (29–31 Okt)"
+    df_w["Pekan"] = df_w["DayNum"].apply(assign_pekan)
+
+    w_Order = ["Pekan 1 (1–7 Okt)", "Pekan 2 (8–14 Okt)", "Pekan 3 (15–21 Okt)", "Pekan 4 (22–28 Okt)", "Pekan 5 (29–31 Okt)"]
+    w_rows = []
+    for wk in w_Order:
+        sub = df_w[df_w["Pekan"] == wk]
+        if sub.empty: continue
+        jh = len(sub)
+        tot_gab = float(sub["Total_Gabungan"].sum())
+        tot_leads = float(sub["Total_Leads"].sum())
+        tot_crm = float(sub["Total_CRM"].sum())
+        nisa_tot = float(sub["Nisa"].sum())
+        salma_tot = float(sub["Salma"].sum())
+        aulia_tot = float(sub["Aulia"].sum())
+        cr_valid = sub["CR_Harian_Pct"].dropna()
+        cr_avg = float(cr_valid.mean()) if not cr_valid.empty else 74.3
+        w_rows.append({
+            "Pekan": wk, "Hari Aktif": jh,
+            "Total Donasi": tot_gab, "Rata-Rata Harian": tot_gab / max(1, jh),
+            "Leads Meta": tot_leads, "CRM (Repeat Order)": tot_crm,
+            "CS Nisa": nisa_tot, "CS Salma": salma_tot, "CS Aulia": aulia_tot,
+            "CR Rata-Rata (%)": round(cr_avg, 1),
+            "Porsi Leads (%)": round(tot_leads / tot_gab * 100, 1) if tot_gab > 0 else 0.0,
+            "Porsi CRM (%)": round(tot_crm / tot_gab * 100, 1) if tot_gab > 0 else 0.0
+        })
+    out["weeks_df"] = pd.DataFrame(w_rows)
+    return out
+
 # ==============================================================================
-# 3. KONFIGURASI AKUN LOGIN & ID GOOGLE SHEETS
+# 3. KONFIGURASI AKUN LOGIN & ID GOOGLE SHEETS (TERMASUK TAB ANALISA)
 # ==============================================================================
-ALL_MENUS = ["Dashboard Overview", "Donasi & Satpam Keuangan", "Iklan & Strategi Ads", "Performa CS & Leads", "Logistik & Gudang", "Kalender Distribusi", "Database & WA Blast"]
+ALL_MENUS = [
+    "Dashboard Overview",
+    "Analisa",
+    "Donasi & Satpam Keuangan",
+    "Iklan & Strategi Ads",
+    "Performa CS & Leads",
+    "Logistik & Gudang",
+    "Kalender Distribusi",
+    "Database & WA Blast"
+]
 AUTH_USERS = {
     "amalqu":     {"key": "amalqu", "username_display": "Amalqu", "pw": "Allah1ahad", "role": "Admin", "title": "Super Administrator", "menus": ALL_MENUS},
     "finance":    {"key": "finance", "username_display": "Finance", "pw": "timfinancejaya99", "role": "Finance", "title": "Divisi Finance & Audit", "menus": ALL_MENUS},
-    "advertiser": {"key": "advertiser", "username_display": "Advertiser", "pw": "ngiklangacor99", "role": "Advertiser", "title": "Divisi Digital Ads & Funnel", "menus": ALL_MENUS[:4]},
-    "warehouse":  {"key": "warehouse", "username_display": "Warehouse", "pw": "amansulaiman123", "role": "Warehouse", "title": "Divisi Gudang & Distribusi", "menus": ALL_MENUS[4:6]}
+    "advertiser": {"key": "advertiser", "username_display": "Advertiser", "pw": "ngiklangacor99", "role": "Advertiser", "title": "Divisi Digital Ads & Funnel", "menus": ALL_MENUS[:5]},
+    "warehouse":  {"key": "warehouse", "username_display": "Warehouse", "pw": "amansulaiman123", "role": "Warehouse", "title": "Divisi Gudang & Distribusi", "menus": ALL_MENUS[5:7]}
 }
 
 if st.session_state.auth_user is None:
@@ -258,7 +347,7 @@ def fetch_direct_sheet(key_name, sheet_name=None):
     return pd.DataFrame()
 
 # ==============================================================================
-# 4. CSS SYSTEM
+# 4. CSS SYSTEM LENGKAP & HALAMAN LOGIN
 # ==============================================================================
 is_dark = st.session_state.dark_mode
 css_vars = (
@@ -283,8 +372,8 @@ i[class^="ri-"],i[class*=" ri-"]{{font-family:'remixicon'!important;font-style:n
 .block-container{{padding-top:1.1rem!important;padding-bottom:2rem!important;max-width:1440px!important;}}
 section[data-testid="stSidebar"]{{background-color:var(--bg-card)!important;border-right:1px solid var(--border-soft)!important;width:265px!important;}}
 .sub-box{{background:var(--bg-subcard);border:1px solid var(--border-soft);}}
-section[data-testid="stSidebar"] div[role="radiogroup"]{{gap:6px!important;display:flex!important;flex-direction:column!important;}}
-section[data-testid="stSidebar"] label[data-baseweb="radio"]{{background:transparent!important;border:1px solid transparent!important;border-radius:12px!important;padding:10px 15px!important;margin:0!important;cursor:pointer!important;width:100%!important;}}
+section[data-testid="stSidebar"] div[role="radiogroup"]{{gap:5px!important;display:flex!important;flex-direction:column!important;}}
+section[data-testid="stSidebar"] label[data-baseweb="radio"]{{background:transparent!important;border:1px solid transparent!important;border-radius:12px!important;padding:9px 14px!important;margin:0!important;cursor:pointer!important;width:100%!important;}}
 section[data-testid="stSidebar"] label[data-baseweb="radio"]>div:not([data-testid="stMarkdownContainer"]),section[data-testid="stSidebar"] label[data-baseweb="radio"] input{{display:none!important;width:0!important;height:0!important;}}
 section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover{{background:var(--bg-subcard)!important;border-color:var(--border-soft)!important;}}
 section[data-testid="stSidebar"] label[data-baseweb="radio"] p{{font-size:13px!important;font-weight:600!important;color:var(--text-secondary)!important;margin:0!important;}}
@@ -590,110 +679,126 @@ def extract_day_okt(val_str):
     return None
 
 # ==============================================================================
-# 6. FIREBASE REALTIME ENGINE
+# 6. FIREBASE REALTIME ENGINE LENGKAP (TANPA DIRINGKAS)
 # ==============================================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def load_core_realtime_data(sync_token: int):
     db, sync_status = {}, {}
 
     macro_rows = [
-        ("Januari", 326000000, 313838000, 194267000, 218457000, 222889000, 90949200, 1.44, 40.8, "Tidak Tercapai", 2356),
-        ("Februari", 522000000, 244568000, 230443000, 228843000, 232374000, 12194000, 1.07, 5.2, "Tidak Tercapai", 1906),
-        ("Maret", 835000000, 432950000, 443374100, 331054000, 334504000, 98446500, 1.31, 29.4, "Tidak Tercapai", 3814),
-        ("April", 359000000, 292695000, 253733400, 262156000, 266465000, 26230300, 1.12, 9.8, "Tidak Tercapai", 2225),
-        ("Mei", 395029000, 485195000, 154142300, 335053000, 338597000, 146597000, 1.45, 43.3, "Tercapai", 1454),
-        ("Juni", 434532000, 457976000, 408027750, 345054000, 356438000, 101538000, 1.33, 28.5, "Tercapai", 4103),
-        ("Juli", 477986000, 490683000, 374520900, 345049000, 353467000, 137216000, 1.42, 38.8, "Tercapai", 3586),
-        ("Agustus", 525784000, 371847000, 290718820, 320040000, 322971000, 48876700, 1.16, 15.1, "Tidak Tercapai", 2852),
+        ("Januari",   326000000, 313838000, 194267000, 218457000, 222889000, 90949200,  1.44, 40.8,  "Tidak Tercapai", 2356),
+        ("Februari",  522000000, 244568000, 230443000, 228843000, 232374000, 12194000,  1.07, 5.2,   "Tidak Tercapai", 1906),
+        ("Maret",     835000000, 432950000, 443374100, 331054000, 334504000, 98446500,  1.31, 29.4,  "Tidak Tercapai", 3814),
+        ("April",     359000000, 292695000, 253733400, 262156000, 266465000, 26230300,  1.12, 9.8,   "Tidak Tercapai", 2225),
+        ("Mei",       395029000, 485195000, 154142300, 335053000, 338597000, 146597000, 1.45, 43.3,  "Tercapai",       1454),
+        ("Juni",      434532000, 457976000, 408027750, 345054000, 356438000, 101538000, 1.33, 28.5,  "Tercapai",       4103),
+        ("Juli",      477986000, 490683000, 374520900, 345049000, 353467000, 137216000, 1.42, 38.8,  "Tercapai",       3586),
+        ("Agustus",   525784000, 371847000, 290718820, 320040000, 322971000, 48876700,  1.16, 15.1,  "Tidak Tercapai", 2852),
         ("September", 350000000, 310384000, 272608400, 254360000, 107038000, 203346000, 1.22, 190.0, "Tidak Tercapai", 2599),
-        ("Oktober", 500000000, 298201574, 249458456, 248087884, 248087884, 50113690, 1.20, 20.2, "Realtime", 1818),
+        ("Oktober",   500000000, 298201574, 249458456, 248087884, 248087884, 50113690,  1.20, 20.2,  "Realtime",       1818),
     ]
     db['macro_monthly'] = pd.DataFrame(macro_rows, columns=["Bulan", "Target Bulanan", "Realisasi Finance", "Omset CS", "Budget Iklan", "Total Pengeluaran", "Laba Bersih", "ROFI", "ROI_Pct", "Status Target", "Mushaf Terverifikasi"])
 
     cs_ov_rows = [
-        (1, "Nisa", "Aktif", 1200000000, 15839000, 68093999, 196005644, 125603001, 74540362, 200017711, 197594767, 84384400, 71315000, 150200000, 1033393884, 6219, 166167, "86,1%", "39,4%"),
-        (2, "Salma", "Aktif", 1200000000, 153161444, 130171224, 201796334, 85285000, 50347999, 121468905, 79080000, 104793000, 72695000, 72000000, 998798907, 5898, 169345, "83,2%", "38,1%"),
-        (3, "Aulia", "Aktif", 500000000, 0, 396000, 1894000, 11719000, 11748999, 76174000, 84631886, 84775000, 64809000, 27258456, 336147885, 2128, 157964, "67,2%", "12,8%"),
-        (4, "Desi", "Non-Aktif", 200000000, 25267000, 26163000, 3342596, 23010375, 9298900, 4316750, 6395000, 4917625, 42651438, 0, 145362684, 924, 157319, "72,7%", "5,5%"),
-        (5, "Syafiq", "Non-Aktif", 0, 0, 5619000, 35515478, 8116000, 8206000, 6050000, 0, 0, 0, 0, 63506478, 257, 247107, "0,0%", "2,4%"),
-        (6, "Rida", "Non-Aktif", 150000000, 0, 0, 0, 0, 0, 0, 2495000, 5128000, 15148000, 0, 22771000, 150, 151807, "15,2%", "0,9%"),
-        (7, "Olive", "Aktif CRM", 0, 0, 0, 0, 0, 0, 0, 4324000, 6720800, 5990000, 1296500, 17034800, 106, 160706, "0,0%", "0,6%"),
-        (8, "Sarah", "Non-Aktif", 100000000, 0, 0, 4820000, 0, 0, 0, 0, 0, 0, 0, 4820000, 23, 209565, "4,8%", "0,2%"),
+        (1, "Nisa",   "Aktif",     1200000000, 15839000,  68093999,  196005644, 125603001, 74540362, 200017711, 197594767, 84384400,  71315000, 150200000, 1033393884, 6219, 166167, "86,1%", "39,4%"),
+        (2, "Salma",  "Aktif",     1200000000, 153161444, 130171224, 201796334, 85285000,  50347999, 121468905, 79080000,  104793000, 72695000, 72000000,  998798907,  5898, 169345, "83,2%", "38,1%"),
+        (3, "Aulia",  "Aktif",     500000000,  0,         396000,    1894000,   11719000,  11748999, 76174000,  84631886,  84775000,  64809000, 27258456,  336147885,  2128, 157964, "67,2%", "12,8%"),
+        (4, "Desi",   "Non-Aktif", 200000000,  25267000,  26163000,  3342596,   23010375,  9298900,  4316750,   6395000,   4917625,   42651438, 0,         145362684,  924,  157319, "72,7%", "5,5%"),
+        (5, "Syafiq", "Non-Aktif", 0,          0,         5619000,   35515478,  8116000,   8206000,  6050000,   0,         0,         0,        0,         63506478,   257,  247107, "0,0%",  "2,4%"),
+        (6, "Rida",   "Non-Aktif", 150000000,  0,         0,         0,         0,         0,        0,         2495000,   5128000,   15148000, 0,         22771000,   150,  151807, "15,2%", "0,9%"),
+        (7, "Olive",  "Aktif CRM", 0,          0,         0,         0,         0,         0,        0,         4324000,   6720800,   5990000,  1296500,   17034800,   106,  160706, "0,0%",  "0,6%"),
+        (8, "Sarah",  "Non-Aktif", 100000000,  0,         0,         4820000,   0,         0,        0,         0,         0,         0,        0,         4820000,    23,   209565, "4,8%",  "0,2%"),
     ]
     db['cs_overview'] = pd.DataFrame(cs_ov_rows, columns=["Rank", "Nama CS", "Status Okt", "Target Omset", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "Total Omset (Jan-Sep)", "Total Closing", "AOV", "Pencapaian (%)", "Kontribusi (%)"])
 
     db['okt_kpi'] = {"total_donasi": 249458456, "target": 500000000, "capaian_pct": 49.9, "donasi_final": 223500000, "harian_terbaru": 7948000, "verifikasi_pct": 89.6}
     db['okt_finance_mon'] = {"realisasi_finance": 298201574, "budget_iklan": 248087884, "rofi_real": 1.20, "roas_akuisisi": 0.83, "rofi_cs": 1.01, "hari_cutoff": 28, "avg_donasi_hari": 10650056, "avg_ads_hari": 8860281, "estimasi_akhir_bulan": 330151743}
     db['okt_cs_table'] = pd.DataFrame([
-        {"CS / CRM": "Salma", "Harian (Total)": 2464008, "Harian (Final)": 2464008, "Mingguan (Total)": 2464008, "Mingguan (Final)": 2464008, "Bulanan (Total)": 56986008, "Bulanan (Final)": 50828008, "% Verifikasi": "89,2%", "Total Transaksi": 409, "Target (Rp)": 200000000, "% Capaian Target": "28,5%", "Sisa Target": 143013992, "Pending Verifikasi": 6158000, "Target Harian (Sisa)": 4613355},
-        {"CS / CRM": "Aulia", "Harian (Total)": 453000, "Harian (Final)": 453000, "Mingguan (Total)": 453000, "Mingguan (Final)": 453000, "Bulanan (Total)": 13026000, "Bulanan (Final)": 11418000, "% Verifikasi": "87,7%", "Total Transaksi": 126, "Target (Rp)": 50000000, "% Capaian Target": "26,1%", "Sisa Target": 36974000, "Pending Verifikasi": 1608000, "Target Harian (Sisa)": 1192710},
-        {"CS / CRM": "Nisa", "Harian (Total)": 5944000, "Harian (Final)": 5944000, "Mingguan (Total)": 5944000, "Mingguan (Final)": 5944000, "Bulanan (Total)": 122697449, "Bulanan (Final)": 113328449, "% Verifikasi": "92,4%", "Total Transaksi": 809, "Target (Rp)": 200000000, "% Capaian Target": "61,3%", "Sisa Target": 77302551, "Pending Verifikasi": 9369000, "Target Harian (Sisa)": 2493631},
+        {"CS / CRM": "Salma", "Harian (Total)": 2464008, "Harian (Final)": 2464008, "Mingguan (Total)": 2464008, "Mingguan (Final)": 2464008, "Bulanan (Total)": 56986008,  "Bulanan (Final)": 50828008,  "% Verifikasi": "89,2%", "Total Transaksi": 409,  "Target (Rp)": 200000000, "% Capaian Target": "28,5%", "Sisa Target": 143013992, "Pending Verifikasi": 6158000,  "Target Harian (Sisa)": 4613355},
+        {"CS / CRM": "Aulia", "Harian (Total)": 453000,  "Harian (Final)": 453000,  "Mingguan (Total)": 453000,  "Mingguan (Final)": 453000,  "Bulanan (Total)": 13026000,  "Bulanan (Final)": 11418000,  "% Verifikasi": "87,7%", "Total Transaksi": 126,  "Target (Rp)": 50000000,  "% Capaian Target": "26,1%", "Sisa Target": 36974000,  "Pending Verifikasi": 1608000,  "Target Harian (Sisa)": 1192710},
+        {"CS / CRM": "Nisa",  "Harian (Total)": 5944000, "Harian (Final)": 5944000, "Mingguan (Total)": 5944000, "Mingguan (Final)": 5944000, "Bulanan (Total)": 122697449, "Bulanan (Final)": 113328449, "% Verifikasi": "92,4%", "Total Transaksi": 809,  "Target (Rp)": 200000000, "% Capaian Target": "61,3%", "Sisa Target": 77302551,  "Pending Verifikasi": 9369000,  "Target Harian (Sisa)": 2493631},
         {"CS / CRM": "TOTAL", "Harian (Total)": 8861008, "Harian (Final)": 8861008, "Mingguan (Total)": 8861008, "Mingguan (Final)": 8861008, "Bulanan (Total)": 249458456, "Bulanan (Final)": 223500000, "% Verifikasi": "89,6%", "Total Transaksi": 1344, "Target (Rp)": 450000000, "% Capaian Target": "55,4%", "Sisa Target": 200541544, "Pending Verifikasi": 25958456, "Target Harian (Sisa)": 8299695},
     ])
     db['okt_sumber'] = pd.DataFrame([
-        {"CS / CRM": "Salma", "Leads Meta": 45398008, "Repeat Order CRM": 0, "Repeat Order non CRM": 10590000, "Lainnya": 998000, "Total Nominal": 56986008, "% Leads Meta": "79,7%"},
-        {"CS / CRM": "Aulia", "Leads Meta": 1144000, "Repeat Order CRM": 7264000, "Repeat Order non CRM": 0, "Lainnya": 4618000, "Total Nominal": 13026000, "% Leads Meta": "8,8%"},
-        {"CS / CRM": "Nisa", "Leads Meta": 159082448, "Repeat Order CRM": 0, "Repeat Order non CRM": 6181000, "Lainnya": 1291000, "Total Nominal": 166554448, "% Leads Meta": "95,5%"},
+        {"CS / CRM": "Salma", "Leads Meta": 45398008,  "Repeat Order CRM": 0,       "Repeat Order non CRM": 10590000, "Lainnya": 998000,  "Total Nominal": 56986008,  "% Leads Meta": "79,7%"},
+        {"CS / CRM": "Aulia", "Leads Meta": 1144000,   "Repeat Order CRM": 7264000, "Repeat Order non CRM": 0,        "Lainnya": 4618000, "Total Nominal": 13026000,  "% Leads Meta": "8,8%"},
+        {"CS / CRM": "Nisa",  "Leads Meta": 159082448, "Repeat Order CRM": 0,       "Repeat Order non CRM": 6181000,  "Lainnya": 1291000, "Total Nominal": 166554448, "% Leads Meta": "95,5%"},
         {"CS / CRM": "TOTAL", "Leads Meta": 205624456, "Repeat Order CRM": 7264000, "Repeat Order non CRM": 16771000, "Lainnya": 6907000, "Total Nominal": 249458456, "% Leads Meta": "82,4%"},
     ])
     db['okt_kanal_rasio'] = pd.DataFrame([
-        {"Kanal / Metrik Donasi": "Total Leads Meta", "Nominal": "Rp205.624.456", "% Kontribusi / Rasio": "82,4%", "Keterangan & Analisis": "Perolehan donasi dari iklan berbayar Meta Ads"},
-        {"Kanal / Metrik Donasi": "Total CRM (Repeat Order)", "Nominal": "Rp36.927.000", "% Kontribusi / Rasio": "14,8%", "Keterangan & Analisis": "Donasi berulang donatur CRM & non-CRM"},
-        {"Kanal / Metrik Donasi": "Total Sedekah Lainnya", "Nominal": "Rp6.907.000", "% Kontribusi / Rasio": "2,8%", "Keterangan & Analisis": "Donasi program umum di luar mushaf / Quran"},
-        {"Kanal / Metrik Donasi": "ROAS Akuisisi (Leads Meta)", "Nominal": "-", "% Kontribusi / Rasio": "0,83x", "Keterangan & Analisis": "Efektivitas donasi Meta terhadap belanja iklan"},
-        {"Kanal / Metrik Donasi": "ROFI Real Finance", "Nominal": "-", "% Kontribusi / Rasio": "1,20x", "Keterangan & Analisis": "Rasio realisasi donasi terhadap belanja iklan"},
+        {"Kanal / Metrik Donasi": "Total Leads Meta",             "Nominal": "Rp205.624.456", "% Kontribusi / Rasio": "82,4%", "Keterangan & Analisis": "Perolehan donasi dari iklan berbayar Meta Ads"},
+        {"Kanal / Metrik Donasi": "Total CRM (Repeat Order)",     "Nominal": "Rp36.927.000",  "% Kontribusi / Rasio": "14,8%", "Keterangan & Analisis": "Donasi berulang donatur CRM & non-CRM"},
+        {"Kanal / Metrik Donasi": "Total Sedekah Lainnya",        "Nominal": "Rp6.907.000",   "% Kontribusi / Rasio": "2,8%",  "Keterangan & Analisis": "Donasi program umum di luar mushaf / Quran"},
+        {"Kanal / Metrik Donasi": "ROAS Akuisisi (Leads Meta)",   "Nominal": "-",             "% Kontribusi / Rasio": "0,83x", "Keterangan & Analisis": "Efektivitas donasi Meta terhadap belanja iklan"},
+        {"Kanal / Metrik Donasi": "ROFI Real Finance",            "Nominal": "-",             "% Kontribusi / Rasio": "1,20x", "Keterangan & Analisis": "Rasio realisasi donasi terhadap belanja iklan"},
     ])
 
     harian_rows_base = [
-        ("2026-10-01", "Kamis", 2464008, 0, 0, 453000, 5744000, 200000, 8208008, 653000, 8861008, 66),
+        ("2026-10-01", "Kamis",  2464008, 0, 0, 453000, 5744000, 200000, 8208008, 653000, 8861008, 66),
         ("2026-10-02", "Jum'at", 4362000, 629000, 0, 1591000, 8155000, 746000, 12517000, 2966000, 15483000, 74),
-        ("2026-10-03", "Sabtu", 1595000, 70000, 0, 657000, 2094000, 198000, 3689000, 925000, 4614000, 32),
+        ("2026-10-03", "Sabtu",  1595000, 70000, 0, 657000, 2094000, 198000, 3689000, 925000, 4614000, 32),
         ("2026-10-04", "Minggu", 2273000, 50000, 0, 283000, 3785000, 0, 6058000, 333000, 6391000, 46),
-        ("2026-10-05", "Senin", 1375000, 50000, 225000, 1854000, 3738000, 143000, 5338000, 2047000, 7385000, 41),
+        ("2026-10-05", "Senin",  1375000, 50000, 225000, 1854000, 3738000, 143000, 5338000, 2047000, 7385000, 41),
         ("2026-10-06", "Selasa", 1766000, 300000, 719000, 555000, 2979000, 607000, 5464000, 1462000, 6926000, 46),
-        ("2026-10-07", "Rabu", 1062000, 50000, 0, 454000, 3013000, 298000, 4075000, 802000, 4877000, 33),
-        ("2026-10-08", "Kamis", 775000, 530000, 0, 653000, 5168000, 797000, 5943000, 1980000, 7923000, 28),
+        ("2026-10-07", "Rabu",   1062000, 50000, 0, 454000, 3013000, 298000, 4075000, 802000, 4877000, 33),
+        ("2026-10-08", "Kamis",  775000, 530000, 0, 653000, 5168000, 797000, 5943000, 1980000, 7923000, 28),
         ("2026-10-09", "Jum'at", 4816000, 1280000, 0, 853000, 8276000, 609000, 13092000, 2742000, 15834000, 73),
-        ("2026-10-10", "Sabtu", 2388000, 100000, 100000, 707000, 1819000, 229000, 4307000, 1036000, 5343000, 33),
+        ("2026-10-10", "Sabtu",  2388000, 100000, 100000, 707000, 1819000, 229000, 4307000, 1036000, 5343000, 33),
         ("2026-10-11", "Minggu", 1346000, 0, 0, 255000, 4288950, 399000, 5634950, 654000, 6288950, 31),
-        ("2026-10-12", "Senin", 997000, 450000, 0, 154000, 4130000, 400000, 5127000, 1004000, 6131000, 37),
+        ("2026-10-12", "Senin",  997000, 450000, 0, 154000, 4130000, 400000, 5127000, 1004000, 6131000, 37),
         ("2026-10-13", "Selasa", 1092000, 150000, 0, 300000, 7004000, 1079000, 8096000, 1529000, 9625000, 64),
-        ("2026-10-14", "Rabu", 3391000, 100000, 0, 299000, 5488000, 110000, 8879000, 509000, 9388000, 43),
-        ("2026-10-15", "Kamis", 1788000, 332000, 100000, 189000, 6341000, 204000, 8229000, 725000, 8954000, 46),
+        ("2026-10-14", "Rabu",   3391000, 100000, 0, 299000, 5488000, 110000, 8879000, 509000, 9388000, 43),
+        ("2026-10-15", "Kamis",  1788000, 332000, 100000, 189000, 6341000, 204000, 8229000, 725000, 8954000, 46),
         ("2026-10-16", "Jum'at", 230000, 5201000, 0, 1578000, 10099500, 508000, 10329500, 7287000, 17616500, 67),
-        ("2026-10-17", "Sabtu", 200000, 100000, 0, 299000, 4911000, 325000, 5111000, 724000, 5835000, 24),
+        ("2026-10-17", "Sabtu",  200000, 100000, 0, 299000, 4911000, 325000, 5111000, 724000, 5835000, 24),
         ("2026-10-18", "Minggu", 0, 124000, 0, 149000, 6933000, 104000, 6933000, 377000, 7310000, 49),
-        ("2026-10-19", "Senin", 400000, 275000, 0, 300000, 7062999, 0, 7462999, 575000, 8037999, 51),
+        ("2026-10-19", "Senin",  400000, 275000, 0, 300000, 7062999, 0, 7462999, 575000, 8037999, 51),
         ("2026-10-20", "Selasa", 1064000, 1199000, 0, 399000, 7329000, 298000, 8393000, 1896000, 10289000, 61),
-        ("2026-10-21", "Rabu", 5483000, 200000, 0, 948000, 4595000, 218000, 10078000, 1366000, 11444000, 53),
-        ("2026-10-22", "Kamis", 2663000, 398000, 0, 2845000, 4191000, 108000, 6854000, 3351000, 10205000, 36),
+        ("2026-10-21", "Rabu",   5483000, 200000, 0, 948000, 4595000, 218000, 10078000, 1366000, 11444000, 53),
+        ("2026-10-22", "Kamis",  2663000, 398000, 0, 2845000, 4191000, 108000, 6854000, 3351000, 10205000, 36),
         ("2026-10-23", "Jum'at", 9795000, 180000, 0, 4507000, 5530999, 601000, 15325999, 5288000, 20613999, 102),
-        ("2026-10-24", "Sabtu", 5742000, 100000, 0, 400000, 2246000, 0, 7988000, 500000, 8488000, 28),
+        ("2026-10-24", "Sabtu",  5742000, 100000, 0, 400000, 2246000, 0, 7988000, 500000, 8488000, 28),
         ("2026-10-25", "Minggu", 3095000, 30000, 0, 700000, 2470000, 0, 5565000, 730000, 6295000, 31),
-        ("2026-10-26", "Senin", 3331000, 100000, 0, 1349000, 2960000, 0, 6291000, 1449000, 7740000, 43),
+        ("2026-10-26", "Senin",  3331000, 100000, 0, 1349000, 2960000, 0, 6291000, 1449000, 7740000, 43),
         ("2026-10-27", "Selasa", 3966000, 0, 0, 299000, 3583000, 100000, 7549000, 399000, 7948000, 45),
-        ("2026-10-28", "Rabu", 1500000, 0, 0, 0, 1587000, 0, 3087000, 0, 3087000, 15),
+        ("2026-10-28", "Rabu",   1500000, 0, 0, 0, 1587000, 0, 3087000, 0, 3087000, 15),
     ]
-    db['okt_harian'] = pd.DataFrame([{"Tanggal": r[0], "Salma_Meta": r[2], "Salma_CRM": r[3], "Aulia_Meta": r[4], "Aulia_CRM": r[5], "Nisa_Meta": r[6], "Nisa_CRM": r[7], "Total_Leads": r[8], "Total_CRM": r[9], "Total_Gabungan": r[10], "Salma": r[2]+r[3], "Aulia": r[4]+r[5], "Nisa": r[6]+r[7], "Total Donasi": r[10], "Donasi Final": r[10]} for r in harian_rows_base])
+    db['okt_harian'] = pd.DataFrame([
+        {
+            "Tanggal": r[0], "Salma_Meta": r[2], "Salma_CRM": r[3], "Aulia_Meta": r[4], "Aulia_CRM": r[5],
+            "Nisa_Meta": r[6], "Nisa_CRM": r[7], "Total_Leads": r[8], "Total_CRM": r[9], "Total_Gabungan": r[10],
+            "Salma": r[2] + r[3], "Aulia": r[4] + r[5], "Nisa": r[6] + r[7], "Total Donasi": r[10], "Donasi Final": r[10]
+        } for r in harian_rows_base
+    ])
 
-    db['spend_okt_kpi'] = {"total_spending": 0.0, "total_leads": 0, "avg_cpr": 0.0, "leads_closing": 1298, "nominal_closing": 205624456.0, "total_roas": 0.0, "avg_cpr_harian": 0.0, "spend_per_hari": 0.0, "leads_per_hari": 0.0}
-    db['spend_okt_df'] = pd.DataFrame([{"Tanggal": r[0], "Hari": r[1], "Spending (Rp)": 0.0, "Leads": 0, "Rata-Rata CPR": 0.0, "Leads Closing": r[11], "Nominal Closing (Rp)": float(r[8]), "ROAS": 0.0, "Catatan / Evaluasi": "-"} for r in harian_rows_base])
+    db['spend_okt_kpi'] = {
+        "total_spending": 0.0, "total_leads": 0, "avg_cpr": 0.0,
+        "leads_closing": 1298, "nominal_closing": 205624456.0, "total_roas": 0.0,
+        "avg_cpr_harian": 0.0, "spend_per_hari": 0.0, "leads_per_hari": 0.0
+    }
+    db['spend_okt_df'] = pd.DataFrame([
+        {
+            "Tanggal": r[0], "Hari": r[1], "Spending (Rp)": 0.0, "Leads": 0,
+            "Rata-Rata CPR": 0.0, "Leads Closing": r[11], "Nominal Closing (Rp)": float(r[8]),
+            "ROAS": 0.0, "Catatan / Evaluasi": "-"
+        } for r in harian_rows_base
+    ])
 
     db['stok_rincian_baru'] = pd.DataFrame([
-        {"Produk & Kategori": "Mushaf - Super Tajwid", "Kanal Promosi": "Meta Ads", "Siap Salur (Stiker)": 458, "Belum Siap (Proses)": 0, "Total Stok Fisik": 458},
-        {"Produk & Kategori": "Mushaf - Al Wakaf (Meta Ads)", "Kanal Promosi": "Meta Ads", "Siap Salur (Stiker)": 2565, "Belum Siap (Proses)": 51, "Total Stok Fisik": 2616},
-        {"Produk & Kategori": "Mushaf - Al Wakaf (TikTok)", "Kanal Promosi": "TikTok", "Siap Salur (Stiker)": 479, "Belum Siap (Proses)": 0, "Total Stok Fisik": 479},
-        {"Produk & Kategori": "Buku Belajar Super Tahsin", "Kanal Promosi": "TikTok", "Siap Salur (Stiker)": 2224, "Belum Siap (Proses)": 0, "Total Stok Fisik": 2224},
-        {"Produk & Kategori": "Titipan Mitra Yayasan Lain", "Kanal Promosi": "Yayasan Lain", "Siap Salur (Stiker)": 0, "Belum Siap (Proses)": 0, "Total Stok Fisik": 0},
-        {"Produk & Kategori": "TOTAL INVENTARIS FISIK", "Kanal Promosi": "Semua Kanal", "Siap Salur (Stiker)": 5726, "Belum Siap (Proses)": 51, "Total Stok Fisik": 5777},
+        {"Produk & Kategori": "Mushaf - Super Tajwid",       "Kanal Promosi": "Meta Ads",     "Siap Salur (Stiker)": 458,  "Belum Siap (Proses)": 0,  "Total Stok Fisik": 458},
+        {"Produk & Kategori": "Mushaf - Al Wakaf (Meta Ads)","Kanal Promosi": "Meta Ads",     "Siap Salur (Stiker)": 2565, "Belum Siap (Proses)": 51, "Total Stok Fisik": 2616},
+        {"Produk & Kategori": "Mushaf - Al Wakaf (TikTok)",  "Kanal Promosi": "TikTok",       "Siap Salur (Stiker)": 479,  "Belum Siap (Proses)": 0,  "Total Stok Fisik": 479},
+        {"Produk & Kategori": "Buku Belajar Super Tahsin",   "Kanal Promosi": "TikTok",       "Siap Salur (Stiker)": 2224, "Belum Siap (Proses)": 0,  "Total Stok Fisik": 2224},
+        {"Produk & Kategori": "Titipan Mitra Yayasan Lain",  "Kanal Promosi": "Yayasan Lain", "Siap Salur (Stiker)": 0,    "Belum Siap (Proses)": 0,  "Total Stok Fisik": 0},
+        {"Produk & Kategori": "TOTAL INVENTARIS FISIK",      "Kanal Promosi": "Semua Kanal",  "Siap Salur (Stiker)": 5726, "Belum Siap (Proses)": 51, "Total Stok Fisik": 5777},
     ])
     db['stok_defisit_baru'] = pd.DataFrame([
-        {"Periode / Komponen Analisis": "Kebutuhan Agustus 2026", "Target / Stok": "604", "Keterangan Operasional": "Realisasi: 0 Pcs", "Gap / Defisit": "604", "Status & Rekomendasi": "Belum Salur"},
-        {"Periode / Komponen Analisis": "Kebutuhan September 2026", "Target / Stok": "2.599", "Keterangan Operasional": "Realisasi: 0 Pcs", "Gap / Defisit": "2.599", "Status & Rekomendasi": "Belum Salur"},
-        {"Periode / Komponen Analisis": "Kebutuhan Oktober 2026", "Target / Stok": "1.818", "Keterangan Operasional": "Realisasi: 100 Pcs", "Gap / Defisit": "1.718", "Status & Rekomendasi": "Sebagian Salur"},
-        {"Periode / Komponen Analisis": "Total Kebutuhan (Agust - Okt)", "Target / Stok": "5.021", "Keterangan Operasional": "Akumulasi 3 Bulan", "Gap / Defisit": "4.921", "Status & Rekomendasi": "Target Distribusi Aktif"},
-        {"Periode / Komponen Analisis": "Total Stok Mushaf Meta LP", "Target / Stok": "3.074", "Keterangan Operasional": "Siap 3.023 + Proses 51", "Gap / Defisit": "(1.947)", "Status & Rekomendasi": "Kekurangan Meta LP"},
-        {"Periode / Komponen Analisis": "KEKURANGAN MUSHAF META LP", "Target / Stok": "1.947", "Keterangan Operasional": "Defisit vs Stok Meta LP", "Gap / Defisit": "(1.947)", "Status & Rekomendasi": "WAJIB BELI 1.947 MUSHAF"},
+        {"Periode / Komponen Analisis": "Kebutuhan Agustus 2026",            "Target / Stok": "604",   "Keterangan Operasional": "Realisasi: 0 Pcs",          "Gap / Defisit": "604",     "Status & Rekomendasi": "Belum Salur"},
+        {"Periode / Komponen Analisis": "Kebutuhan September 2026",          "Target / Stok": "2.599", "Keterangan Operasional": "Realisasi: 0 Pcs",          "Gap / Defisit": "2.599",   "Status & Rekomendasi": "Belum Salur"},
+        {"Periode / Komponen Analisis": "Kebutuhan Oktober 2026",            "Target / Stok": "1.818", "Keterangan Operasional": "Realisasi: 100 Pcs",        "Gap / Defisit": "1.718",   "Status & Rekomendasi": "Sebagian Salur"},
+        {"Periode / Komponen Analisis": "Total Kebutuhan (Agust - Okt)",     "Target / Stok": "5.021", "Keterangan Operasional": "Akumulasi 3 Bulan",         "Gap / Defisit": "4.921",   "Status & Rekomendasi": "Target Distribusi Aktif"},
+        {"Periode / Komponen Analisis": "Total Stok Mushaf Meta LP",         "Target / Stok": "3.074", "Keterangan Operasional": "Siap 3.023 + Proses 51",    "Gap / Defisit": "(1.947)", "Status & Rekomendasi": "Kekurangan Meta LP"},
+        {"Periode / Komponen Analisis": "KEKURANGAN MUSHAF META LP",         "Target / Stok": "1.947", "Keterangan Operasional": "Defisit vs Stok Meta LP",   "Gap / Defisit": "(1.947)", "Status & Rekomendasi": "WAJIB BELI 1.947 MUSHAF"},
     ])
 
     db['db_kpi'] = {"total_donatur": 14464, "total_leads": 3416, "total_kontak": 17880, "konversi_pct": 80.9, "total_donasi_kumulatif": 2604405566, "rata_rata_donasi": 180061, "callback_segera": 12285}
@@ -706,19 +811,28 @@ def load_core_realtime_data(sync_token: int):
         {"Prioritas": "D4", "Segmentasi Donatur": "Donatur Churn / Pasif", "Target Tindakan CRM": "Reaktivasi Program Spesial", "Jumlah Donatur": 4385, "Porsi (%)": "30,32%"},
         {"Prioritas": "Reguler", "Segmentasi Donatur": "Donatur Standar / Umum", "Target Tindakan CRM": "Broadcast Buletin Massal", "Jumlah Donatur": 9805, "Porsi (%)": "67,79%"},
     ])
-    db['db_reminder'] = pd.DataFrame([{"Status Reminder": "CALLBACK SEGERA", "Jumlah Donatur": 12285, "Persentase (%)": "84,94%"}, {"Status Reminder": "PANTAU", "Jumlah Donatur": 1628, "Persentase (%)": "11,26%"}, {"Status Reminder": "AMAN", "Jumlah Donatur": 550, "Persentase (%)": "3,80%"}])
-    db['db_status_donatur'] = pd.DataFrame([{"Status Donatur": "Donatur Churn", "Jumlah Donatur": 6933, "Persentase (%)": "47,93%"}, {"Status Donatur": "Donatur Baru", "Jumlah Donatur": 6894, "Persentase (%)": "47,66%"}, {"Status Donatur": "Donatur Aktif", "Jumlah Donatur": 492, "Persentase (%)": "3,40%"}, {"Status Donatur": "Donatur Rutin", "Jumlah Donatur": 145, "Persentase (%)": "1,00%"}])
+    db['db_reminder'] = pd.DataFrame([
+        {"Status Reminder": "CALLBACK SEGERA", "Jumlah Donatur": 12285, "Persentase (%)": "84,94%"},
+        {"Status Reminder": "PANTAU", "Jumlah Donatur": 1628, "Persentase (%)": "11,26%"},
+        {"Status Reminder": "AMAN", "Jumlah Donatur": 550, "Persentase (%)": "3,80%"},
+    ])
+    db['db_status_donatur'] = pd.DataFrame([
+        {"Status Donatur": "Donatur Churn", "Jumlah Donatur": 6933, "Persentase (%)": "47,93%"},
+        {"Status Donatur": "Donatur Baru", "Jumlah Donatur": 6894, "Persentase (%)": "47,66%"},
+        {"Status Donatur": "Donatur Aktif", "Jumlah Donatur": 492, "Persentase (%)": "3,40%"},
+        {"Status Donatur": "Donatur Rutin", "Jumlah Donatur": 145, "Persentase (%)": "1,00%"},
+    ])
     db['packing_dus_bulanan'] = pd.DataFrame([
-        {"Bulan": "Januari", "Total Mushaf Terverifikasi": 2356, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 2356},
-        {"Bulan": "Februari", "Total Mushaf Terverifikasi": 1906, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 1906},
-        {"Bulan": "Maret", "Total Mushaf Terverifikasi": 3814, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 3814},
-        {"Bulan": "April", "Total Mushaf Terverifikasi": 2225, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 2225},
-        {"Bulan": "Mei", "Total Mushaf Terverifikasi": 1454, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 1454},
-        {"Bulan": "Juni", "Total Mushaf Terverifikasi": 4103, "Verifikasi (Belum Stiker)": 0, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 4103},
-        {"Bulan": "Juli", "Total Mushaf Terverifikasi": 3586, "Verifikasi (Belum Stiker)": 1, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 3585},
-        {"Bulan": "Agustus", "Total Mushaf Terverifikasi": 2852, "Verifikasi (Belum Stiker)": 12, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 2840, "Distribusi Selesai": 0},
-        {"Bulan": "September", "Total Mushaf Terverifikasi": 2599, "Verifikasi (Belum Stiker)": 1972, "Penamaan Mushaf (Stiker)": 447, "Packing / Proses Distribusi": 180, "Distribusi Selesai": 0},
-        {"Bulan": "Oktober", "Total Mushaf Terverifikasi": 1818, "Verifikasi (Belum Stiker)": 1718, "Penamaan Mushaf (Stiker)": 0, "Packing / Proses Distribusi": 0, "Distribusi Selesai": 100},
+        {"Bulan": "Januari",   "Total Mushaf Terverifikasi": 2356, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2356},
+        {"Bulan": "Februari",  "Total Mushaf Terverifikasi": 1906, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1906},
+        {"Bulan": "Maret",     "Total Mushaf Terverifikasi": 3814, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3814},
+        {"Bulan": "April",     "Total Mushaf Terverifikasi": 2225, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 2225},
+        {"Bulan": "Mei",       "Total Mushaf Terverifikasi": 1454, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 1454},
+        {"Bulan": "Juni",      "Total Mushaf Terverifikasi": 4103, "Verifikasi (Belum Stiker)": 0,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 4103},
+        {"Bulan": "Juli",      "Total Mushaf Terverifikasi": 3586, "Verifikasi (Belum Stiker)": 1,    "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 3585},
+        {"Bulan": "Agustus",   "Total Mushaf Terverifikasi": 2852, "Verifikasi (Belum Stiker)": 12,   "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 2840, "Distribusi Selesai": 0},
+        {"Bulan": "September", "Total Mushaf Terverifikasi": 2599, "Verifikasi (Belum Stiker)": 1972, "Penamaan Mushaf (Stiker)": 447, "Packing / Proses Distribusi": 180,  "Distribusi Selesai": 0},
+        {"Bulan": "Oktober",   "Total Mushaf Terverifikasi": 1818, "Verifikasi (Belum Stiker)": 1718, "Penamaan Mushaf (Stiker)": 0,   "Packing / Proses Distribusi": 0,    "Distribusi Selesai": 100},
     ])
 
     fb_data = {}
@@ -859,20 +973,20 @@ def load_core_realtime_data(sync_token: int):
         else: db['stok_rincian_baru'][cn] = db['stok_rincian_baru'][cn].apply(lambda x: int(num_clean(x)))
 
     kal_base = [
-        (1, "2026-10-15", "AQ-2026-081", "Penyaluran Jatikramat Bekasi", "PIC Lembaga", "Terdaftar", "Jatikramat, Kec. Jatiasih, Kota Bekasi", 5, "Al Wakaf Tiktok", "[Success]"),
-        (2, "2026-10-16", "AQ-2026-082", "Muhammadiyah Wil Jabar", "PIC Muhammadiyah", "Terdaftar", "Muhammadiyah Wil Jabar", 200, "Super Tajwid", "[Success]"),
-        (3, "2026-10-17", "AQ-2026-083", "Al Qosbah Bandung", "PIC Al Qosbah", "Terdaftar", "Al Qosbah Bandung", 150, "Al Wakaf Tiktok", "[Success]"),
-        (4, "2026-10-18", "AQ-2026-084", "SMP Plus Ibnu Rusyd", "PIC Ibnu Rusyd", "Terdaftar", "SMP Plus Ibnu Rusyd", 450, "Al Wakaf Tiktok", "[Success]"),
-        (5, "2026-10-19", "AQ-2026-085", "Lembaga Mitra Wakaf", "PIC Mitra", "Terdaftar", "Jawa Barat", 200, "Al Wakaf Tiktok", "[Success]"),
-        (6, "2026-10-20", "AQ-2026-087", "MDU AL-ITTIHAD CIHERANG CIPELAH", "Abdul Karim", "Terdaftar", "Rancabali, Kab. Bandung", 108, "Super Tajwid", "[Success]"),
-        (7, "2026-10-22", "AQ-2026-074", "TPA Al Hijrah", "Arip Rohman", "Terdaftar", "Sidomulyo, Kab. Lampung Selatan", 45, "Super Tajwid", "[Success]"),
-        (8, "2026-10-22", "AQ-2026-105", "IRMA Baitul Ummah", "Hj. Intan Margaretha F.", "Terdaftar", "SMKN 1 Katapang, Kab. Bandung", 200, "Super Tajwid", "[Success]"),
-        (9, "2026-10-23", "AQ-2026-008", "KBMA Desa Margahayu Selatan", "Ibu Ade", "Terdaftar", "Masjid Alfurqon", 50, "Super Tajwid", "[Success]"),
-        (10, "2026-10-24", "AQ-2026-058", "Majelis Ta'lim Ciparay", "Bu. Dadang / Nur Erlina", "Terdaftar", "Ciparay, Kab. Bandung", 150, "Super Tajwid", "[Success]"),
-        (11, "2026-10-27", "AQ-2026-026", "SD Plus Al Furqan", "Dedeh Kurniati", "Terdaftar", "SD PLUS AL FURQON CIMAHI", 114, "Al Wakaf Tiktok", "[Success]"),
-        (12, "2026-10-27", "AQ-2026-059", "Yayasan Bahtera Peradaban Cendekia", "Rona Rohmana", "Terdaftar", "Saguling, Kab. Bandung Barat", 67, "Al Wakaf Tiktok", "[Scheduled]"),
-        (13, "2026-10-29", "AQ-2026-072", "TPQ Tarbiyatul Aulad", "Ust. Fandy Abdillah", "Terdaftar", "Sukanagara, Kab. Cianjur", 70, "Al Wakaf Tiktok", "[Scheduled]"),
-        (14, "2026-10-31", "AQ-2026-104", "MDTA Darul Jannah", "Ai Neni", "Terdaftar", "Jawa Barat", 100, "Al Wakaf Tiktok", "[Scheduled]"),
+        (1,  "2026-10-15", "AQ-2026-081", "Penyaluran Jatikramat Bekasi",       "PIC Lembaga",             "Terdaftar", "Jatikramat, Kec. Jatiasih, Kota Bekasi", 5,   "Al Wakaf Tiktok", "[Success]"),
+        (2,  "2026-10-16", "AQ-2026-082", "Muhammadiyah Wil Jabar",             "PIC Muhammadiyah",        "Terdaftar", "Muhammadiyah Wil Jabar",                 200, "Super Tajwid",    "[Success]"),
+        (3,  "2026-10-17", "AQ-2026-083", "Al Qosbah Bandung",                  "PIC Al Qosbah",           "Terdaftar", "Al Qosbah Bandung",                      150, "Al Wakaf Tiktok", "[Success]"),
+        (4,  "2026-10-18", "AQ-2026-084", "SMP Plus Ibnu Rusyd",                "PIC Ibnu Rusyd",          "Terdaftar", "SMP Plus Ibnu Rusyd",                    450, "Al Wakaf Tiktok", "[Success]"),
+        (5,  "2026-10-19", "AQ-2026-085", "Lembaga Mitra Wakaf",                "PIC Mitra",               "Terdaftar", "Jawa Barat",                             200, "Al Wakaf Tiktok", "[Success]"),
+        (6,  "2026-10-20", "AQ-2026-087", "MDU AL-ITTIHAD CIHERANG CIPELAH",    "Abdul Karim",             "Terdaftar", "Rancabali, Kab. Bandung",                108, "Super Tajwid",    "[Success]"),
+        (7,  "2026-10-22", "AQ-2026-074", "TPA Al Hijrah",                      "Arip Rohman",             "Terdaftar", "Sidomulyo, Kab. Lampung Selatan",        45,  "Super Tajwid",    "[Success]"),
+        (8,  "2026-10-22", "AQ-2026-105", "IRMA Baitul Ummah",                  "Hj. Intan Margaretha F.", "Terdaftar", "SMKN 1 Katapang, Kab. Bandung",          200, "Super Tajwid",    "[Success]"),
+        (9,  "2026-10-23", "AQ-2026-008", "KBMA Desa Margahayu Selatan",        "Ibu Ade",                 "Terdaftar", "Masjid Alfurqon",                        50,  "Super Tajwid",    "[Success]"),
+        (10, "2026-10-24", "AQ-2026-058", "Majelis Ta'lim Ciparay",             "Bu. Dadang / Nur Erlina", "Terdaftar", "Ciparay, Kab. Bandung",                  150, "Super Tajwid",    "[Success]"),
+        (11, "2026-10-27", "AQ-2026-026", "SD Plus Al Furqan",                  "Dedeh Kurniati",          "Terdaftar", "SD PLUS AL FURQON CIMAHI",               114, "Al Wakaf Tiktok", "[Success]"),
+        (12, "2026-10-27", "AQ-2026-059", "Yayasan Bahtera Peradaban Cendekia", "Rona Rohmana",            "Terdaftar", "Saguling, Kab. Bandung Barat",           67,  "Al Wakaf Tiktok", "[Scheduled]"),
+        (13, "2026-10-29", "AQ-2026-072", "TPQ Tarbiyatul Aulad",               "Ust. Fandy Abdillah",     "Terdaftar", "Sukanagara, Kab. Cianjur",               70,  "Al Wakaf Tiktok", "[Scheduled]"),
+        (14, "2026-10-31", "AQ-2026-104", "MDTA Darul Jannah",                  "Ai Neni",                 "Terdaftar", "Jawa Barat",                             100, "Al Wakaf Tiktok", "[Scheduled]"),
     ]
     db['kalender_okt'] = pd.DataFrame(kal_base, columns=["No", "Tanggal Agenda", "ID Proyek", "Nama Lembaga Penerima", "Nama PIC", "Kontak WA", "Wilayah / Titik Lokasi", "Jumlah Mushaf (Pcs)", "Variasi Mushaf", "Status"])
 
@@ -1009,10 +1123,10 @@ def load_lazy_contacts_db(sync_token: int):
                 if len(df_c) >= 5: return df_c.reset_index(drop=True), False
         except: continue
     sample = pd.DataFrame([
-        {"Nama Donatur": "Donatur Prioritas A1", "Nomor Whatsapp": "628000000001", "PiC": "CS Nisa", "Program": "Waqaf/Mushaf", "Donasi Terakhir": "1 Oktober 2026", "Kategori": "Donatur Rutin", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Sudah", "Prioritas": "A1", "Reminder": "AMAN"},
-        {"Nama Donatur": "Donatur Aktif B1", "Nomor Whatsapp": "628000000002", "PiC": "CS Salma", "Program": "AmalQu", "Donasi Terakhir": "2 Oktober 2026", "Kategori": "Donatur Aktif", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "B1", "Reminder": "PANTAU"},
-        {"Nama Donatur": "Donatur Baru Reguler", "Nomor Whatsapp": "628000000003", "PiC": "CS Aulia", "Program": "AmalQu", "Donasi Terakhir": "5 Oktober 2026", "Kategori": "Donatur Baru", "FU1 (Sapaan)": "Belum", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "Reguler", "Reminder": "CALLBACK SEGERA"},
-        {"Nama Donatur": "Donatur Reaktivasi D4", "Nomor Whatsapp": "628000000004", "PiC": "CRM Olive", "Program": "Waqaf/Mushaf", "Donasi Terakhir": "14 Februari 2026", "Kategori": "Donatur Churn", "FU1 (Sapaan)": "Belum", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "D4", "Reminder": "CALLBACK SEGERA"},
+        {"Nama Donatur": "Donatur Prioritas A1", "Nomor Whatsapp": "628000000001", "PiC": "CS Nisa",  "Program": "Waqaf/Mushaf", "Donasi Terakhir": "1 Oktober 2026",   "Kategori": "Donatur Rutin", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Sudah", "Prioritas": "A1",      "Reminder": "AMAN"},
+        {"Nama Donatur": "Donatur Aktif B1",     "Nomor Whatsapp": "628000000002", "PiC": "CS Salma", "Program": "AmalQu",       "Donasi Terakhir": "2 Oktober 2026",   "Kategori": "Donatur Aktif", "FU1 (Sapaan)": "Sudah", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "B1",      "Reminder": "PANTAU"},
+        {"Nama Donatur": "Donatur Baru Reguler", "Nomor Whatsapp": "628000000003", "PiC": "CS Aulia", "Program": "AmalQu",       "Donasi Terakhir": "5 Oktober 2026",   "Kategori": "Donatur Baru",  "FU1 (Sapaan)": "Belum", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "Reguler", "Reminder": "CALLBACK SEGERA"},
+        {"Nama Donatur": "Donatur Reaktivasi D4","Nomor Whatsapp": "628000000004", "PiC": "CRM Olive","Program": "Waqaf/Mushaf", "Donasi Terakhir": "14 Februari 2026", "Kategori": "Donatur Churn", "FU1 (Sapaan)": "Belum", "FU3 (Laporan Penyaluran)": "Belum", "Prioritas": "D4",      "Reminder": "CALLBACK SEGERA"},
     ])
     return sample, True
 
@@ -1020,23 +1134,48 @@ current_sync_token = int(time.time() // 30) + (st.session_state.sync_nonce * 100
 db = load_core_realtime_data(current_sync_token)
 df_macro = db['macro_monthly']
 sa = db['stok_audit']
-
+# === AKHIR BAGIAN 1 (LANJUTKAN BAGIAN 2 TEPAT DI BAWAH BARIS INI) ===
 # ==============================================================================
 # 7. SIDEBAR NAVIGASI & STATUS FIREBASE
 # ==============================================================================
 with st.sidebar:
-    render_html(f'<div style="display:flex;align-items:center;gap:12px;padding:4px 4px 18px 4px;border-bottom:1px solid var(--border-soft);margin-bottom:14px;">{build_logo_html(44)}<div><div class="brand-title" style="font-family:\'Outfit\',sans-serif!important;font-weight:800;font-size:21px;line-height:1.15;">AmalQu</div><div class="brand-sub" style="font-size:11px;font-weight:600;line-height:1.3;margin-top:2px;">Yayasan AmalQu Indonesia Peduli</div></div></div><div style="font-size:11px;font-weight:700;color:var(--text-muted)!important;letter-spacing:0.8px;text-transform:uppercase;padding:4px 6px 8px 6px;">MENU DIVISI ({user_role.upper()})</div>')
+    render_html(f"""
+    <div style="display:flex;align-items:center;gap:12px;padding:4px 4px 18px 4px;border-bottom:1px solid var(--border-soft);margin-bottom:14px;">
+        {build_logo_html(44)}
+        <div>
+            <div class="brand-title" style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:21px;line-height:1.15;">AmalQu</div>
+            <div class="brand-sub" style="font-size:11px;font-weight:600;line-height:1.3;margin-top:2px;">Yayasan AmalQu Indonesia Peduli</div>
+        </div>
+    </div>
+    <div style="font-size:11px;font-weight:700;color:var(--text-muted)!important;letter-spacing:0.8px;text-transform:uppercase;padding:4px 6px 8px 6px;">
+        MENU DIVISI ({user_role.upper()})
+    </div>
+    """)
     menu_pilihan = st.radio("Navigasi Utama", allowed_menus, label_visibility="collapsed")
     fb_lbl = "● Firebase Realtime Aktif" if db.get("firebase_connected") else "● Mode Cadangan (Run Apps Script)"
     fb_col = "#10B981" if db.get("firebase_connected") else "#F59E0B"
-    render_html(f'<div class="sub-box" style="margin-top:16px;padding:13px 14px;border-radius:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><i class="ri-shield-user-line" style="color:#6366F1!important;font-size:16px;"></i><span style="font-size:12.5px;font-weight:700;">{current_user["username_display"]} ({user_role})</span></div><div style="font-size:11px;color:var(--text-secondary)!important;line-height:1.45;">{current_user["title"]}<br><span style="color:{fb_col}!important;font-weight:700;">{fb_lbl}</span><br><span style="font-size:10.5px;color:var(--text-muted)!important;">Update: {db["last_sync"]}</span></div></div>')
+    render_html(f"""
+    <div class="sub-box" style="margin-top:16px;padding:13px 14px;border-radius:14px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+            <i class="ri-shield-user-line" style="color:#6366F1!important;font-size:16px;"></i>
+            <span style="font-size:12.5px;font-weight:700;">{current_user['username_display']} ({user_role})</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-secondary)!important;line-height:1.45;">
+            {current_user['title']}<br>
+            <span style="color:{fb_col}!important;font-weight:700;">{fb_lbl}</span><br>
+            <span style="font-size:10.5px;color:var(--text-muted)!important;">Update: {db['last_sync']}</span>
+        </div>
+    </div>
+    """)
     with st.expander("📡 Detail Koneksi Modul"):
         for mod_name, stat_txt in db.get("sync_status", {}).items():
             st.caption(f"🟢 **{mod_name}**: {stat_txt}")
     sb_col1, sb_col2 = st.columns(2)
     with sb_col1:
         if st.button("🔄 Sync Data", use_container_width=True):
-            st.session_state.sync_nonce += 1; st.cache_data.clear(); st.rerun()
+            st.session_state.sync_nonce += 1
+            st.cache_data.clear()
+            st.rerun()
     with sb_col2:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.auth_user = None
@@ -1050,12 +1189,29 @@ with st.sidebar:
 def render_bento_kpi(icon_cls, color_theme, title, value, badge_text, badge_theme="green", subtext=""):
     ib_map = {"indigo": "ib-indigo", "orange": "ib-orange", "emerald": "ib-emerald", "rose": "ib-rose"}
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
-    arrow_ic = "ri-arrow-right-up-line" if badge_theme in ["green", "indigo"] else ("ri-alert-line" if badge_theme == "red" else "ri-information-line")
-    render_html(f'<div class="bento-card kpi-uniform"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><span style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;line-height:1.25;">{title}</span><div class="icon-box {ib_map.get(color_theme, "ib-indigo")}"><i class="{icon_cls}"></i></div></div><div class="kpi-val-fluid">{value}</div><div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;"><span class="badge-pill {bp_map.get(badge_theme, "bp-green")}"><i class="{arrow_ic}"></i> {badge_text}</span><span style="font-size:10.5px;color:var(--text-muted)!important;font-weight:600;">{subtext}</span></div></div>')
+    arrow_ic = "ri-arrow-right-up-line" if badge_theme in ["green", "indigo"] else ("ri-arrow-right-down-line" if badge_theme == "red" else "ri-information-line")
+    render_html(f"""
+    <div class="bento-card kpi-uniform">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <span style="font-size:12px;font-weight:600;color:var(--text-secondary)!important;line-height:1.25;">{title}</span>
+            <div class="icon-box {ib_map.get(color_theme, 'ib-indigo')}"><i class="{icon_cls}"></i></div>
+        </div>
+        <div class="kpi-val-fluid">{value}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+            <span class="badge-pill {bp_map.get(badge_theme, 'bp-green')}"><i class="{arrow_ic}"></i> {badge_text}</span>
+            <span style="font-size:10.5px;color:var(--text-muted)!important;font-weight:600;">{subtext}</span>
+        </div>
+    </div>
+    """)
 
 def step_item_html(title, sub, val, color, is_last=False):
     mb = "0" if is_last else "7px"
-    return f'<div class="satpam-step" style="border-left:4px solid {color};margin-bottom:{mb};"><div><div style="font-size:12px;font-weight:700;">{title}</div><div style="font-size:10.5px;color:var(--text-muted)!important;">{sub}</div></div><div class="satpam-val" style="color:{color}!important;">{val}</div></div>'
+    return (
+        f'<div class="satpam-step" style="border-left:4px solid {color};margin-bottom:{mb};">'
+        f'<div><div style="font-size:12px;font-weight:700;">{title}</div>'
+        f'<div style="font-size:10.5px;color:var(--text-muted)!important;">{sub}</div></div>'
+        f'<div class="satpam-val" style="color:{color}!important;">{val}</div></div>'
+    )
 
 def render_satpam_5_highlight_card(sm_dict, title_box="Satpam Keuangan: 5 Indikator Utama"):
     if sm_dict['selisih_saldo_beli'] >= 0:
@@ -1074,7 +1230,20 @@ def render_satpam_5_highlight_card(sm_dict, title_box="Satpam Keuangan: 5 Indika
     s4 = step_item_html(lbl_no4, sub_no4, val_no4, col_no4)
     s5 = step_item_html("5. Cashback Akhir (Kalau Dipotong Kekurangan Beli)", "Sisa bersih Saldo Cashback 35% setelah talangan beli mushaf", rp(sm_dict['cashback_akhir']), col_cb_akhir, is_last=True)
 
-    render_html(f'<div class="bento-card" style="min-height:400px;display:flex;flex-direction:column;justify-content:space-between;"><div><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;"><span style="font-family:\'Outfit\',sans-serif!important;font-weight:800;font-size:14.8px;"><i class="ri-shield-star-fill" style="color:#6366F1!important;"></i> {title_box}</span><span class="badge-pill bp-{sm_dict["badge_col"]}">{sm_dict["status_txt"]}</span></div><div style="font-size:11px;color:var(--text-secondary)!important;margin-bottom:8px;padding:6px 10px;background:var(--bg-subcard);border-radius:8px;">Donasi: <b>{rp_short(sm_dict["donasi"])}</b> − Iklan: <b>{rp_short(sm_dict["iklan"])}</b> − Ops 10%: <b>{rp_short(sm_dict["beban_ops_10"])}</b> → <b>DSD: {rp(sm_dict["dsd"])}</b></div>{s1}{s2}{s3}{s4}{s5}</div></div>')
+    render_html(f"""
+    <div class="bento-card" style="min-height:400px;display:flex;flex-direction:column;justify-content:space-between;">
+        <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+                <span style="font-family:'Outfit',sans-serif!important;font-weight:800;font-size:14.8px;"><i class="ri-shield-star-fill" style="color:#6366F1!important;"></i> {title_box}</span>
+                <span class="badge-pill bp-{sm_dict['badge_col']}">{sm_dict['status_txt']}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary)!important;margin-bottom:8px;padding:6px 10px;background:var(--bg-subcard);border-radius:8px;">
+                Donasi: <b>{rp_short(sm_dict['donasi'])}</b> − Iklan: <b>{rp_short(sm_dict['iklan'])}</b> − Ops 10%: <b>{rp_short(sm_dict['beban_ops_10'])}</b> → <b>DSD: {rp(sm_dict['dsd'])}</b>
+            </div>
+            {s1}{s2}{s3}{s4}{s5}
+        </div>
+    </div>
+    """)
 
 def render_chart_header(title_text, subtitle_text="", badge_text="", badge_theme="indigo"):
     bp_map = {"green": "bp-green", "red": "bp-red", "orange": "bp-orange", "indigo": "bp-indigo"}
@@ -1118,15 +1287,16 @@ def render_saas_table(df: pd.DataFrame, max_rows=80):
         for col_name in df_show.columns:
             val_str = str(row[col_name])
             low_v = val_str.lower()
-            if any(k in low_v for k in ["success", "sukses", "tercapai", "aktif", "siap salur cukup", "stok cukup", "tersedia", "selesai", "aman", "sudah", "sebagian salur", "surplus", "sempurna"]) and "tidak" not in low_v and "non-aktif" not in low_v and "belum" not in low_v:
+            if any(k in low_v for k in ["success", "sukses", "tercapai", "aktif", "siap salur cukup", "stok cukup", "tersedia", "selesai", "aman", "sudah", "sebagian salur", "surplus", "sempurna", "tumbuh", "naik"]) and "tidak" not in low_v and "non-aktif" not in low_v and "belum" not in low_v:
                 cell_html = f'<span class="badge-pill bp-green"><i class="ri-checkbox-circle-fill"></i> {val_str}</span>'
-            elif any(k in low_v for k in ["tidak tercapai", "non-aktif", "defisit", "kritis", "habis", "callback segera", "churn", "kurang", "wajib beli", "belum cukup", "kekurangan"]):
+            elif any(k in low_v for k in ["tidak tercapai", "non-aktif", "defisit", "kritis", "habis", "callback segera", "churn", "kurang", "wajib beli", "belum cukup", "kekurangan", "turun"]):
                 cell_html = f'<span class="badge-pill bp-red"><i class="ri-error-warning-fill"></i> {val_str}</span>'
-            elif any(k in low_v for k in ["scheduled", "perlu", "proses", "menipis", "pantau", "belum", "realtime", "reguler", "plafon", "saldo"]):
+            elif any(k in low_v for k in ["scheduled", "perlu", "proses", "menipis", "pantau", "belum", "realtime", "reguler", "plafon", "saldo", "stabil"]):
                 cell_html = f'<span class="badge-pill bp-orange"><i class="ri-time-fill"></i> {val_str}</span>'
-            elif col_name in ["Nama CS", "CS / CRM", "Bulan", "Nama Lembaga Penerima", "Nama Donatur", "Jenis Produk", "Produk & Kategori", "Periode / Komponen Analisis", "Komponen Arus Kas Yayasan"]:
+            elif col_name in ["Nama CS", "CS / CRM", "Bulan", "Pekan", "Metrik Evaluasi", "Nama Lembaga Penerima", "Nama Donatur", "Jenis Produk", "Produk & Kategori", "Periode / Komponen Analisis", "Komponen Arus Kas Yayasan"]:
                 cell_html = f'<span style="font-weight:700;">{val_str}</span>'
-            else: cell_html = val_str
+            else:
+                cell_html = val_str
             tds += f"<td>{cell_html}</td>"
         trs += f"<tr{tr_cls}>{tds}</tr>"
     render_html(f'<div class="saas-table-wrap"><table class="saas-table"><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table></div>')
@@ -1141,15 +1311,19 @@ def render_rekap_harian_cs_table(df_har: pd.DataFrame, avg_cr_val: float):
     for _, r in df_har.iterrows():
         cr_v = r.get("CR_Harian_Pct", np.nan)
         cr_txt = f'<span class="badge-pill bp-green">{cr_v:.1f}%</span>' if pd.notna(cr_v) and cr_v > 0 else "-"
-        rows_html += (f"<tr><td style='font-weight:700;'>{r['Tanggal']}</td><td>{rp_dash(r['Salma_Meta'])}</td><td>{rp_dash(r['Salma_CRM'])}</td>"
-                      f"<td>{rp_dash(r['Aulia_Meta'])}</td><td>{rp_dash(r['Aulia_CRM'])}</td><td>{rp_dash(r['Nisa_Meta'])}</td><td>{rp_dash(r['Nisa_CRM'])}</td>"
-                      f"<td style='font-weight:600;'>{rp_dash(r['Total_Leads'])}</td><td style='font-weight:600;'>{rp_dash(r['Total_CRM'])}</td>"
-                      f"<td style='font-weight:700;color:#10B981!important;'>{rp_dash(r['Total_Gabungan'])}</td><td style='text-align:center;'>{cr_txt}</td></tr>")
-    rows_html += (f"<tr class='row-summary'><td>TOTAL</td><td>{rp_dash(sum_s_m)}</td><td>{rp_dash(sum_s_c)}</td><td>{rp_dash(sum_a_m)}</td><td>{rp_dash(sum_a_c)}</td>"
-                  f"<td>{rp_dash(sum_n_m)}</td><td>{rp_dash(sum_n_c)}</td><td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td><td>{rp_dash(sum_gab)}</td><td style='text-align:center;'>Rata-rata CR</td></tr>"
-                  f"<tr class='row-grand'><td>TOTAL KESELURUHAN</td><td colspan='2' style='text-align:center;color:#10B981!important;'>Salma: {rp_dash(sum_s_m + sum_s_c)}</td>"
-                  f"<td colspan='2' style='text-align:center;color:#10B981!important;'>Aulia: {rp_dash(sum_a_m + sum_a_c)}</td><td colspan='2' style='text-align:center;color:#10B981!important;'>Nisa: {rp_dash(sum_n_m + sum_n_c)}</td>"
-                  f"<td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td><td style='color:#6366F1!important;'>{rp_dash(sum_gab)}</td><td style='text-align:center;'><span class='badge-pill bp-indigo'>{avg_cr_val:.1f}%</span></td></tr>")
+        rows_html += (
+            f"<tr><td style='font-weight:700;'>{r['Tanggal']}</td><td>{rp_dash(r['Salma_Meta'])}</td><td>{rp_dash(r['Salma_CRM'])}</td>"
+            f"<td>{rp_dash(r['Aulia_Meta'])}</td><td>{rp_dash(r['Aulia_CRM'])}</td><td>{rp_dash(r['Nisa_Meta'])}</td><td>{rp_dash(r['Nisa_CRM'])}</td>"
+            f"<td style='font-weight:600;'>{rp_dash(r['Total_Leads'])}</td><td style='font-weight:600;'>{rp_dash(r['Total_CRM'])}</td>"
+            f"<td style='font-weight:700;color:#10B981!important;'>{rp_dash(r['Total_Gabungan'])}</td><td style='text-align:center;'>{cr_txt}</td></tr>"
+        )
+    rows_html += (
+        f"<tr class='row-summary'><td>TOTAL</td><td>{rp_dash(sum_s_m)}</td><td>{rp_dash(sum_s_c)}</td><td>{rp_dash(sum_a_m)}</td><td>{rp_dash(sum_a_c)}</td>"
+        f"<td>{rp_dash(sum_n_m)}</td><td>{rp_dash(sum_n_c)}</td><td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td><td>{rp_dash(sum_gab)}</td><td style='text-align:center;'>Rata-rata CR</td></tr>"
+        f"<tr class='row-grand'><td>TOTAL KESELURUHAN</td><td colspan='2' style='text-align:center;color:#10B981!important;'>Salma: {rp_dash(sum_s_m + sum_s_c)}</td>"
+        f"<td colspan='2' style='text-align:center;color:#10B981!important;'>Aulia: {rp_dash(sum_a_m + sum_a_c)}</td><td colspan='2' style='text-align:center;color:#10B981!important;'>Nisa: {rp_dash(sum_n_m + sum_n_c)}</td>"
+        f"<td>{rp_dash(sum_leads)}</td><td>{rp_dash(sum_crm)}</td><td style='color:#6366F1!important;'>{rp_dash(sum_gab)}</td><td style='text-align:center;'><span class='badge-pill bp-indigo'>{avg_cr_val:.1f}%</span></td></tr>"
+    )
     render_html(f'<div class="saas-table-wrap"><table class="saas-table"><thead><tr><th rowspan="2" style="vertical-align:middle;">Tanggal</th><th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Salma</th><th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Aulia</th><th colspan="2" style="text-align:center;border-bottom:1px solid var(--border-strong);">Nisa</th><th rowspan="2" style="vertical-align:middle;">Total Leads</th><th rowspan="2" style="vertical-align:middle;">Total CRM</th><th rowspan="2" style="vertical-align:middle;">Total Gabungan</th><th rowspan="2" style="vertical-align:middle;text-align:center;">CR Harian (%)</th></tr><tr><th>Leads Meta</th><th>CRM</th><th>Leads Meta</th><th>CRM</th><th>Leads Meta</th><th>CRM</th></tr></thead><tbody>{rows_html}</tbody></table></div>')
 
 # ==============================================================================
@@ -1224,7 +1398,294 @@ if menu_pilihan == "Dashboard Overview":
         render_bento_kpi("ri-scales-3-line", "indigo", "Distribusi vs (Meta LP + TikTok)", f"{sa['stok_fisik_mushaf_tersedia']:,} Mushaf".replace(",", "."), f"vs 3 Bln ({sa['kebutuhan_agust_okt']:,}): {lbl_3bln}".replace(",", "."), "orange" if sa['selisih_gabungan_vs_3bln'] < 0 else "green", f"vs Okt ({sa['kebutuhan_okt']:,}): {lbl_okt_d}".replace(",", "."))
 
 # ==============================================================================
-# HALAMAN 2: DONASI & SATPAM KEUANGAN (MURNI FINANCE — TANPA DATA CS/LEADS)
+# HALAMAN 2: TAB ANALISA (KOMPARASI MINGGUAN WoW & BULANAN MoM + DIAGNOSA OTOMATIS)
+# ==============================================================================
+elif menu_pilihan == "Analisa":
+    an_data = hitung_analisa_wow_mom(db.get('okt_harian', pd.DataFrame()), df_macro, db['cs_overview'], db['okt_finance_mon'])
+    df_wk = an_data["weeks_df"]
+
+    mode_analisa = st.radio(
+        "Pilih Mode Analisa Pertumbuhan & Diagnosa:",
+        [
+            "1. Analisa Mingguan (Week-over-Week / Pekan Saat Ini vs Pekan Sebelumnya)",
+            "2. Analisa Bulanan (Month-over-Month / Bulan Saat Ini vs Bulan Sebelumnya)"
+        ],
+        horizontal=True, key="analisa_mode_radio"
+    )
+
+    if mode_analisa.startswith("1.") and not df_wk.empty and len(df_wk) >= 2:
+        list_pekan = df_wk["Pekan"].tolist()
+        def_curr_idx = len(list_pekan) - 1
+        def_prev_idx = max(0, def_curr_idx - 1)
+
+        col_w1, col_w2 = st.columns(2)
+        with col_w1:
+            pekan_curr = st.selectbox("Pilih Pekan Saat Ini (Yang Dianalisa):", list_pekan, index=def_curr_idx, key="an_wk_curr")
+        with col_w2:
+            pekan_prev = st.selectbox("Bandingkan dengan Pekan Sebelumnya:", list_pekan, index=def_prev_idx, key="an_wk_prev")
+
+        rw_c = df_wk[df_wk["Pekan"] == pekan_curr].iloc[0]
+        rw_p = df_wk[df_wk["Pekan"] == pekan_prev].iloc[0]
+
+        pct_tot_s, diff_tot, pct_tot_v, th_tot = pct_delta_info(rw_c["Total Donasi"], rw_p["Total Donasi"])
+        pct_avg_s, diff_avg, pct_avg_v, th_avg = pct_delta_info(rw_c["Rata-Rata Harian"], rw_p["Rata-Rata Harian"])
+        pct_ld_s, diff_ld, pct_ld_v, th_ld = pct_delta_info(rw_c["Leads Meta"], rw_p["Leads Meta"])
+        pct_crm_s, diff_crm, pct_crm_v, th_crm = pct_delta_info(rw_c["CRM (Repeat Order)"], rw_p["CRM (Repeat Order)"])
+
+        render_html(f'<div class="section-divider"><i class="ri-line-chart-line" style="color:#6366F1!important;"></i> 1. PERBANDINGAN UTAMA: {pekan_curr.upper()} vs {pekan_prev.upper()}</div>')
+        wk1, wk2, wk3, wk4 = st.columns(4)
+        with wk1:
+            render_bento_kpi("ri-funds-box-line", "indigo", f"Total Donasi ({pekan_curr[:7]})", rp_short(rw_c["Total Donasi"]), f"{pct_tot_s} ({rp_short(diff_tot)})", th_tot, f"Sblmnya: {rp_short(rw_p['Total Donasi'])}")
+        with wk2:
+            render_bento_kpi("ri-speed-up-line", "emerald", "Rata-Rata Harian (Run-Rate)", rp_short(rw_c["Rata-Rata Harian"]), f"{pct_avg_s} ({rp_short(diff_avg)}/hr)", th_avg, f"Sblmnya: {rp_short(rw_p['Rata-Rata Harian'])}/hr")
+        with wk3:
+            render_bento_kpi("ri-advertisement-line", "orange", "Perolehan Leads Meta (Iklan)", rp_short(rw_c["Leads Meta"]), f"{pct_ld_s} ({rp_short(diff_ld)})", th_ld, f"Sblmnya: {rp_short(rw_p['Leads Meta'])}")
+        with wk4:
+            render_bento_kpi("ri-repeat-2-line", "rose", "Perolehan CRM (Repeat Order)", rp_short(rw_c["CRM (Repeat Order)"]), f"{pct_crm_s} ({rp_short(diff_crm)})", th_crm, f"Sblmnya: {rp_short(rw_p['CRM (Repeat Order)'])}")
+
+        # Mesin Diagnosa Otomatis Mingguan
+        cs_deltas = []
+        for cs_nm in ["CS Nisa", "CS Salma", "CS Aulia"]:
+            ps, df_v, pv, _ = pct_delta_info(rw_c[cs_nm], rw_p[cs_nm])
+            cs_deltas.append((cs_nm, rw_c[cs_nm], rw_p[cs_nm], df_v, pv, ps))
+        cs_sorted_up = sorted(cs_deltas, key=lambda x: x[3], reverse=True)
+        cs_sorted_dn = sorted(cs_deltas, key=lambda x: x[3])
+
+        items_naik, items_turun = [], []
+        if diff_ld > 0: items_naik.append(f"<b>Leads Meta (Iklan)</b> tumbuh <b>{pct_ld_s} (+{rp(diff_ld)})</b> dari {rp(rw_p['Leads Meta'])} menjadi {rp(rw_c['Leads Meta'])}.")
+        else: items_turun.append(f"<b>Leads Meta (Iklan)</b> mengalami penurunan <b>{pct_ld_s} ({rp(diff_ld)})</b> dibanding pekan sebelumnya.")
+
+        if diff_crm > 0: items_naik.append(f"<b>Repeat Order CRM</b> melonjak <b>{pct_crm_s} (+{rp(diff_crm)})</b> menjadi {rp(rw_c['CRM (Repeat Order)'])}.")
+        elif diff_crm < 0: items_turun.append(f"<b>Repeat Order CRM</b> turun <b>{pct_crm_s} ({rp(diff_crm)})</b> dari {rp(rw_p['CRM (Repeat Order)'])} ke {rp(rw_c['CRM (Repeat Order)'])}.")
+
+        for c_nm, vc, vp, dv, pv, ps in cs_sorted_up:
+            if dv > 0: items_naik.append(f"<b>{c_nm}</b> mencatat kenaikan terbesar <b>{ps} (+{rp(dv)})</b> menjadi {rp(vc)}.")
+            elif dv < 0: items_turun.append(f"<b>{c_nm}</b> turun <b>{ps} ({rp(dv)})</b> dari {rp(vp)} menjadi {rp(vc)}.")
+
+        if not items_naik: items_naik.append("Stabilitas rata-rata konversi harian tetap terjaga meskipun volume trafik melandai.")
+        if not items_turun: items_turun.append("Tidak ada penurunan mayor; seluruh kanal utama (Leads Meta & CRM) tumbuh positif.")
+
+        porsi_ld_diff = rw_c["Porsi Leads (%)"] - rw_p["Porsi Leads (%)"]
+        cr_diff = rw_c["CR Rata-Rata (%)"] - rw_p["CR Rata-Rata (%)"]
+        beda_txt = (
+            f"• <b>Pergeseran Sumber Donasi:</b> Porsi Leads Meta berubah dari <b>{rw_p['Porsi Leads (%)']:.1f}%</b> menjadi <b>{rw_c['Porsi Leads (%)']:.1f}%</b> ({'+' if porsi_ld_diff>=0 else ''}{porsi_ld_diff:.1f}%), sedangkan porsi CRM berada di <b>{rw_c['Porsi CRM (%)']:.1f}%</b>.<br>"
+            f"• <b>Perubahan Kecepatan Harian:</b> Laju perolehan harian bergeser dari <b>{rp(rw_p['Rata-Rata Harian'])}/hari</b> ({rw_p['Hari Aktif']} hari aktif) menjadi <b>{rp(rw_c['Rata-Rata Harian'])}/hari</b> ({rw_c['Hari Aktif']} hari aktif).<br>"
+            f"• <b>Kualitas Konversi (CR):</b> Rata-rata CR CS berubah dari <b>{rw_p['CR Rata-Rata (%)']:.1f}%</b> ke <b>{rw_c['CR Rata-Rata (%)']:.1f}%</b> ({'+' if cr_diff>=0 else ''}{cr_diff:.1f}%)."
+        )
+
+        akar_masalah_txt = (
+            f"• <b>Penyebab Utama {'Kenaikan' if diff_tot >= 0 else 'Penurunan'}:</b> Total donasi {pekan_curr} {'naik' if diff_tot >= 0 else 'turun'} sebesar <b>{rp(abs(diff_tot))} ({pct_tot_s})</b> terutama dipicu oleh perubahan pada <b>{cs_sorted_up[0][0] if diff_tot >= 0 else cs_sorted_dn[0][0]}</b> ({rp(cs_sorted_up[0][3] if diff_tot >= 0 else cs_sorted_dn[0][3])}) serta pergerakan kanal <b>{'Leads Meta' if abs(diff_ld) >= abs(diff_crm) else 'CRM'}</b>.<br>"
+            f"• <b>Fokus Perbaikan Pekan Depan:</b> Pertahankan momentum pada <b>{cs_sorted_up[0][0]}</b> dan segera lakukan evaluasi *follow-up* / *WA Blast* pada <b>{cs_sorted_dn[0][0]}</b> untuk menambal selisih {rp(abs(cs_sorted_dn[0][3]))}."
+        )
+
+        render_html('<div class="section-divider"><i class="ri-Stethoscope-line" style="color:#10B981!important;"></i> 2. KESIMPULAN & DIAGNOSA OTOMATIS MINGGUAN (APA YANG NAIK, TURUN & BERBEDA)</div>')
+        dg1, dg2 = st.columns(2)
+        with dg1:
+            render_html(f"""
+            <div class="bento-card" style="min-height:270px;">
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#10B981!important;margin-bottom:8px;">
+                    <i class="ri-arrow-up-circle-fill"></i> Apa yang Tumbuh / Naik di {pekan_curr}?
+                </div>
+                <div style="font-size:12px;line-height:1.65;color:var(--text-primary)!important;margin-bottom:12px;">
+                    {"<br>".join(["• " + x for x in items_naik])}
+                </div>
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#EF4444!important;margin-bottom:8px;">
+                    <i class="ri-arrow-down-circle-fill"></i> Apa yang Turun / Melambat?
+                </div>
+                <div style="font-size:12px;line-height:1.65;color:var(--text-primary)!important;">
+                    {"<br>".join(["• " + x for x in items_turun])}
+                </div>
+            </div>
+            """)
+        with dg2:
+            render_html(f"""
+            <div class="bento-card" style="min-height:270px;">
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#6366F1!important;margin-bottom:8px;">
+                    <i class="ri-exchange-box-fill"></i> Apa yang Berbeda Dibanding {pekan_prev}?
+                </div>
+                <div style="font-size:12px;line-height:1.6;color:var(--text-primary)!important;margin-bottom:12px;">
+                    {beda_txt}
+                </div>
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#F59E0B!important;margin-bottom:8px;">
+                    <i class="ri-lightbulb-flash-fill"></i> Kesimpulan Akar Masalah & Solusi
+                </div>
+                <div style="font-size:12px;line-height:1.6;color:var(--text-primary)!important;">
+                    {akar_masalah_txt}
+                </div>
+            </div>
+            """)
+
+        ch_w1, ch_w2 = st.columns(2)
+        with ch_w1:
+            render_chart_header("Tren Pertumbuhan Mingguan: Leads Meta vs CRM (Pekan 1 – Pekan 4)", "Perbandingan perolehan setiap pekan di bulan Oktober 2026", "Mingguan", "indigo")
+            fig_wk1 = go.Figure()
+            fig_wk1.add_trace(go.Bar(x=df_wk["Pekan"], y=df_wk["Leads Meta"], name="Leads Meta (Iklan)", marker_color="#6366F1", marker_cornerradius=6))
+            fig_wk1.add_trace(go.Bar(x=df_wk["Pekan"], y=df_wk["CRM (Repeat Order)"], name="CRM (Repeat Order)", marker_color="#10B981", marker_cornerradius=6))
+            apply_saas_plotly(fig_wk1, height=300, is_currency=True)
+            fig_wk1.update_layout(barmode="group")
+            st.plotly_chart(fig_wk1, use_container_width=True)
+
+        with ch_w2:
+            render_chart_header(f"Komparasi Perolehan per CS: {pekan_prev[:7]} vs {pekan_curr[:7]}", "Melihat CS mana yang naik atau turun dibanding pekan sebelumnya", "Per CS", "orange")
+            fig_wk2 = go.Figure()
+            cs_labels = ["CS Nisa", "CS Salma", "CS Aulia"]
+            fig_wk2.add_trace(go.Bar(x=cs_labels, y=[rw_p[c] for c in cs_labels], name=pekan_prev, marker_color="#94A3B8", marker_cornerradius=6))
+            fig_wk2.add_trace(go.Bar(x=cs_labels, y=[rw_c[c] for c in cs_labels], name=pekan_curr, marker_color="#FF6B4A", marker_cornerradius=6))
+            apply_saas_plotly(fig_wk2, height=300, is_currency=True)
+            fig_wk2.update_layout(barmode="group")
+            st.plotly_chart(fig_wk2, use_container_width=True)
+
+        render_html('<div class="section-divider"><i class="ri-table-2" style="color:#6366F1!important;"></i> TABEL LENGKAP PERBANDINGAN PERFORMA PEKAN 1 S/D PEKAN 4 (OKTOBER 2026)</div>')
+        df_wk_disp = df_wk.copy()
+        for col_rp in ["Total Donasi", "Rata-Rata Harian", "Leads Meta", "CRM (Repeat Order)", "CS Nisa", "CS Salma", "CS Aulia"]:
+            df_wk_disp[col_rp] = df_wk_disp[col_rp].apply(rp)
+        df_wk_disp["CR Rata-Rata (%)"] = df_wk_disp["CR Rata-Rata (%)"].apply(lambda x: f"{x:.1f}%")
+        df_wk_disp["Porsi Leads (%)"] = df_wk_disp["Porsi Leads (%)"].apply(lambda x: f"{x:.1f}%")
+        df_wk_disp["Porsi CRM (%)"] = df_wk_disp["Porsi CRM (%)"].apply(lambda x: f"{x:.1f}%")
+        render_saas_table(df_wk_disp)
+
+    else:
+        list_bulan = df_macro["Bulan"].tolist()
+        col_m1, col_m2 = st.columns(2)
+        with col_m1:
+            bln_curr = st.selectbox("Pilih Bulan Saat Ini (Yang Dianalisa):", list_bulan, index=len(list_bulan)-1, key="an_mo_curr")
+        with col_m2:
+            idx_prev_m = max(0, list_bulan.index(bln_curr) - 1)
+            bln_prev = st.selectbox("Bandingkan dengan Bulan Sebelumnya:", list_bulan, index=idx_prev_m, key="an_mo_prev")
+
+        rm_c = df_macro[df_macro["Bulan"] == bln_curr].iloc[0]
+        rm_p = df_macro[df_macro["Bulan"] == bln_prev].iloc[0]
+
+        hari_c = int(db['okt_finance_mon'].get('hari_cutoff', 28)) if bln_curr == "Oktober" else 30
+        hari_p = int(db['okt_finance_mon'].get('hari_cutoff', 28)) if bln_prev == "Oktober" else 30
+
+        real_c, real_p = float(rm_c["Realisasi Finance"]), float(rm_p["Realisasi Finance"])
+        avg_day_c, avg_day_p = real_c / max(1, hari_c), real_p / max(1, hari_p)
+        ads_c, ads_p = float(rm_c["Budget Iklan"]), float(rm_p["Budget Iklan"])
+        rofi_c, rofi_p = float(rm_c["ROFI"]), float(rm_p["ROFI"])
+        dsd_c = (real_c - ads_c) - (0.10 * real_c)
+        dsd_p = (real_p - ads_p) - (0.10 * real_p)
+
+        pct_fin_s, diff_fin, _, th_fin = pct_delta_info(real_c, real_p)
+        pct_day_s, diff_day, _, th_day = pct_delta_info(avg_day_c, avg_day_p)
+        pct_ads_s, diff_ads, _, th_ads = pct_delta_info(ads_c, ads_p)
+        pct_dsd_s, diff_dsd, _, th_dsd = pct_delta_info(dsd_c, dsd_p)
+
+        render_html(f'<div class="section-divider"><i class="ri-calendar-event-line" style="color:#6366F1!important;"></i> 1. PERBANDINGAN BULANAN (MoM): {bln_curr.upper()} vs {bln_prev.upper()}</div>')
+        mk1, mk2, mk3, mk4 = st.columns(4)
+        with mk1:
+            render_bento_kpi("ri-bank-line", "indigo", f"Realisasi Finance ({bln_curr})", rp_short(real_c), f"{pct_fin_s} ({rp_short(diff_fin)})", th_fin, f"{bln_prev}: {rp_short(real_p)}")
+        with mk2:
+            render_bento_kpi("ri-speed-up-line", "emerald", f"Laju Donasi Harian ({bln_curr})", rp_short(avg_day_c), f"{pct_day_s} ({rp_short(diff_day)}/hr)", th_day, f"{bln_prev}: {rp_short(avg_day_p)}/hr")
+        with mk3:
+            render_bento_kpi("ri-advertisement-line", "orange", f"Belanja Iklan & ROFI ({bln_curr})", rp_short(ads_c), f"ROFI {rofi_c:.2f}x (Sblm: {rofi_p:.2f}x)", "green" if rofi_c >= rofi_p else "orange", f"{bln_prev}: {rp_short(ads_p)}")
+        with mk4:
+            render_bento_kpi("ri-wallet-3-line", "rose", f"Dana Siap Salur / DSD ({bln_curr})", rp_short(dsd_c), f"{pct_dsd_s} ({rp_short(diff_dsd)})", th_dsd, f"{bln_prev}: {rp_short(dsd_p)}")
+
+        # Diagnosa CS Bulanan
+        df_cs_m = db['cs_overview']
+        cs_m_up, cs_m_dn = [], []
+        if bln_curr in df_cs_m.columns and bln_prev in df_cs_m.columns:
+            for _, r_cs in df_cs_m.iterrows():
+                nm_c = r_cs["Nama CS"]
+                vc_m, vp_m = float(r_cs[bln_curr]), float(r_cs[bln_prev])
+                if vc_m == 0 and vp_m == 0: continue
+                ps_m, dv_m, _, _ = pct_delta_info(vc_m, vp_m)
+                if dv_m > 0: cs_m_up.append(f"<b>CS {nm_c}</b> tumbuh <b>{ps_m} (+{rp(dv_m)})</b> dari {rp(vp_m)} ke {rp(vc_m)}.")
+                elif dv_m < 0: cs_m_dn.append(f"<b>CS {nm_c}</b> turun <b>{ps_m} ({rp(dv_m)})</b> dari {rp(vp_m)} menjadi {rp(vc_m)}.")
+
+        if avg_day_c > avg_day_p:
+            cs_m_up.insert(0, f"<b>Laju Donasi Harian (Daily Run-Rate)</b> tumbuh <b>{pct_day_s} (+{rp(diff_day)}/hari)</b> dibanding {bln_prev}.")
+        else:
+            cs_m_dn.insert(0, f"<b>Laju Donasi Harian</b> melambat <b>{pct_day_s} ({rp(diff_day)}/hari)</b> dibanding {bln_prev}.")
+
+        if bln_curr == "Oktober":
+            est_okt_full = float(db['okt_finance_mon'].get('estimasi_akhir_bulan', avg_day_c * 31))
+            ps_est, dv_est, _, _ = pct_delta_info(est_okt_full, real_p)
+            if dv_est > 0:
+                cs_m_up.append(f"<b>Proyeksi Penutupan 31 Oktober ({rp(est_okt_full)})</b> diprediksi melampaui realisasi {bln_prev} sebesar <b>{ps_est} (+{rp(dv_est)})</b>.")
+
+        if not cs_m_up: cs_m_up.append("Efisiensi operasional tetap terjaga di tengah penyesuaian anggaran iklan.")
+        if not cs_m_dn: cs_m_dn.append("Tidak ada penurunan signifikan pada CS utama yang aktif.")
+
+        render_html('<div class="section-divider"><i class="ri-mind-map" style="color:#10B981!important;"></i> 2. KESIMPULAN & DIAGNOSA OTOMATIS BULANAN (MONTH-OVER-MONTH)</div>')
+        md1, md2 = st.columns(2)
+        with md1:
+            render_html(f"""
+            <div class="bento-card" style="min-height:265px;">
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#10B981!important;margin-bottom:8px;">
+                    <i class="ri-arrow-up-circle-fill"></i> Apa yang Tumbuh di Bulan {bln_curr} dibanding {bln_prev}?
+                </div>
+                <div style="font-size:12px;line-height:1.65;color:var(--text-primary)!important;margin-bottom:12px;">
+                    {"<br>".join(["• " + x for x in cs_m_up[:4]])}
+                </div>
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#EF4444!important;margin-bottom:8px;">
+                    <i class="ri-arrow-down-circle-fill"></i> Apa yang Turun & Penyebab Masalahnya?
+                </div>
+                <div style="font-size:12px;line-height:1.65;color:var(--text-primary)!important;">
+                    {"<br>".join(["• " + x for x in cs_m_dn[:4]])}
+                </div>
+            </div>
+            """)
+        with md2:
+            render_html(f"""
+            <div class="bento-card" style="min-height:265px;">
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#6366F1!important;margin-bottom:8px;">
+                    <i class="ri-git-Compare-fill"></i> Apa yang Berbeda di {bln_curr} Dibanding {bln_prev}?
+                </div>
+                <div style="font-size:12px;line-height:1.6;color:var(--text-primary)!important;margin-bottom:12px;">
+                    • <b>Struktur Tim CS:</b> Pada {bln_prev} masih terdapat kontribusi CS yang kini non-aktif (seperti Desi/Rida), sedangkan di {bln_curr} beban omzet ditopang oleh 3 CS inti (Nisa, Salma, Aulia) dengan lonjakan tajam pada CS Nisa.<br>
+                    • <b>Rasio Efisiensi Iklan (ROFI):</b> ROFI bergerak dari <b>{rofi_p:.2f}x</b> ({bln_prev}) ke <b>{rofi_c:.2f}x</b> ({bln_curr}) dengan selisih belanja iklan {rp(diff_ads)}.<br>
+                    • <b>Kebutuhan Mushaf Terverifikasi:</b> Tercatat <b>{int(rm_c['Mushaf Terverifikasi']):,} Pcs</b> di {bln_curr} berbanding <b>{int(rm_p['Mushaf Terverifikasi']):,} Pcs</b> di {bln_prev}.
+                </div>
+                <div style="font-family:'Outfit',sans-serif!important;font-size:15px;font-weight:800;color:#F59E0B!important;margin-bottom:8px;">
+                    <i class="ri-rocket-fill"></i> Rekomendasi Strategi Penutupan Bulan
+                </div>
+                <div style="font-size:12px;line-height:1.6;color:var(--text-primary)!important;">
+                    • Maksimalkan sisa hari bulan berjalan dengan mengunci paket bundling minimal 2 mushaf (Rp 198rb) dan mengaktifkan *WA Blast* ke 12.285 kontak *Callback Segera* untuk mendongkrak ROFI di atas 1,50x.
+                </div>
+            </div>
+            """)
+
+        cm_l, cm_r = st.columns(2)
+        with cm_l:
+            render_chart_header(f"Komparasi Finansial: {bln_prev} vs {bln_curr}", "Perbandingan Realisasi Finance, Omset CS, Budget Iklan & DSD", f"{bln_prev} vs {bln_curr}", "indigo")
+            kat_fin = ["Realisasi Finance", "Omset CS", "Budget Iklan", "Dana Siap Salur (DSD)"]
+            val_p_list = [real_p, float(rm_p["Omset CS"]), ads_p, dsd_p]
+            val_c_list = [real_c, float(rm_c["Omset CS"]), ads_c, dsd_c]
+            fig_mo1 = go.Figure()
+            fig_mo1.add_trace(go.Bar(x=kat_fin, y=val_p_list, name=bln_prev, marker_color="#94A3B8", marker_cornerradius=6))
+            fig_mo1.add_trace(go.Bar(x=kat_fin, y=val_c_list, name=bln_curr, marker_color="#6366F1", marker_cornerradius=6))
+            apply_saas_plotly(fig_mo1, height=300, is_currency=True)
+            fig_mo1.update_layout(barmode="group")
+            st.plotly_chart(fig_mo1, use_container_width=True)
+
+        with cm_r:
+            render_chart_header(f"Komparasi Omzet per CS: {bln_prev} vs {bln_curr}", "Perubahan perolehan masing-masing CS antar bulan", "Per CS", "emerald")
+            df_cs_act = df_cs_m[(df_cs_m[bln_prev] > 0) | (df_cs_m[bln_curr] > 0)]
+            fig_mo2 = go.Figure()
+            fig_mo2.add_trace(go.Bar(x=df_cs_act["Nama CS"], y=df_cs_act[bln_prev], name=bln_prev, marker_color="#94A3B8", marker_cornerradius=6))
+            fig_mo2.add_trace(go.Bar(x=df_cs_act["Nama CS"], y=df_cs_act[bln_curr], name=bln_curr, marker_color="#10B981", marker_cornerradius=6))
+            apply_saas_plotly(fig_mo2, height=300, is_currency=True)
+            fig_mo2.update_layout(barmode="group")
+            st.plotly_chart(fig_mo2, use_container_width=True)
+
+        render_html(f'<div class="section-divider"><i class="ri-table-2" style="color:#6366F1!important;"></i> TABEL KOMPARASI HEAD-TO-HEAD: {bln_prev.upper()} vs {bln_curr.upper()}</div>')
+        rows_comp_m = [
+            ("Realisasi Donasi Finance", rp(real_p), rp(real_c), rp(diff_fin), f"{pct_fin_s} ({'Tumbuh' if diff_fin>=0 else 'Turun'})"),
+            ("Rata-Rata Donasi / Hari", rp(avg_day_p), rp(avg_day_c), rp(diff_day), f"{pct_day_s} ({'Tumbuh' if diff_day>=0 else 'Turun'})"),
+            ("Total Input Dashboard CS", rp(rm_p["Omset CS"]), rp(rm_c["Omset CS"]), rp(float(rm_c["Omset CS"])-float(rm_p["Omset CS"])), pct_delta_info(rm_c["Omset CS"], rm_p["Omset CS"])[0]),
+            ("Belanja Iklan (Ad Spend)", rp(ads_p), rp(ads_c), rp(diff_ads), pct_ads_s),
+            ("Rasio ROFI Finance", f"{rofi_p:.2f}x", f"{rofi_c:.2f}x", f"{rofi_c-rofi_p:+.2f}x", "Aman" if rofi_c >= rofi_p else "Perlu Optimasi"),
+            ("Dana Siap Disalurkan (DSD)", rp(dsd_p), rp(dsd_c), rp(diff_dsd), f"{pct_dsd_s} ({'Tumbuh' if diff_dsd>=0 else 'Turun'})"),
+            ("Saldo Pembelian Mushaf (65% DSD)", rp(0.65*dsd_p), rp(0.65*dsd_c), rp(0.65*diff_dsd), pct_dsd_s),
+            ("Saldo Cashback Awal (35% DSD)", rp(0.35*dsd_p), rp(0.35*dsd_c), rp(0.35*diff_dsd), pct_dsd_s),
+        ]
+        df_comp_m = pd.DataFrame(rows_comp_m, columns=["Metrik Evaluasi", f"Bulan {bln_prev}", f"Bulan {bln_curr}", "Selisih Nominal", "% Pertumbuhan / Status"])
+        render_saas_table(df_comp_m)
+
+# ==============================================================================
+# HALAMAN 3: DONASI & SATPAM KEUANGAN (MURNI FINANCE — TANPA DATA CS/LEADS)
 # ==============================================================================
 elif menu_pilihan == "Donasi & Satpam Keuangan":
     f1_a, f1_b, f1_c = st.columns(3)
@@ -1261,7 +1722,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     c1, c2, c3, c4 = st.columns(4)
     with c1: render_bento_kpi("ri-bank-card-line", "indigo", f"1. Total Donasi Masuk ({lbl_badge})", rp_short(sm['donasi']), "100% Sumber Donasi Utama", "indigo", rp(sm['donasi']))
     with c2: render_bento_kpi("ri-advertisement-line", "orange", "2. Biaya Iklan & Profit Iklan", rp_short(sm['iklan']), f"Profit Iklan: {rp_short(sm['profit_iklan'])}", "orange", f"ROFI: {sm['rofi_real']:.2f}x")
-    with c3: render_bento_kpi("ri-File-shield-2-line", "rose", "3. Beban Operasional (10%)", rp_short(sm['beban_ops_10']), "Flat 10% × Total Donasi", "red", rp(sm['beban_ops_10']))
+    with c3: render_bento_kpi("ri-file-shield-2-line", "rose", "3. Beban Operasional (10%)", rp_short(sm['beban_ops_10']), "Flat 10% × Total Donasi", "red", rp(sm['beban_ops_10']))
     with c4: render_bento_kpi("ri-wallet-3-line", "emerald", "4. Donasi Siap Disalurkan (DSD)", rp_short(sm['dsd']), "Profit Iklan − Operasional 10%", "green" if sm['dsd'] > 0 else "red", rp(sm['dsd']))
 
     render_html('<div class="section-divider"><i class="ri-shield-star-line" style="color:#10B981!important;"></i> TAHAP 2: 5 INDIKATOR UTAMA SATPAM KEUANGAN (ALOKASI MUSHAF 65% vs CASHBACK 35%)</div>')
@@ -1269,7 +1730,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     with g_left:
         render_satpam_5_highlight_card(sm, f"5 Indikator Inti Satpam Keuangan ({lbl_badge})")
     with g_right:
-        render_chart_header("Komparasi Bulanan: Realisasi Donasi Finance vs Biaya Iklan vs Laba Bersih", "Murni data keuangan yayasan sepanjang Januari – Oktober 2026", "Jan – Okt 2026", "indigo")
+        render_chart_header("Komparasi Bulanan: Realisasi Donasi Finance vs Biaya Iklan vs Profit Iklan", "Murni data keuangan yayasan sepanjang Januari – Oktober 2026", "Jan – Okt 2026", "indigo")
         fig_f1 = go.Figure()
         fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Realisasi Finance'], name='Realisasi Finance', marker_color='#6366F1', marker_cornerradius=6))
         fig_f1.add_trace(go.Bar(x=df_macro['Bulan'], y=df_macro['Budget Iklan'], name='Biaya Iklan', marker_color='#FF6B4A', marker_cornerradius=6))
@@ -1290,7 +1751,7 @@ elif menu_pilihan == "Donasi & Satpam Keuangan":
     render_saas_table(df_fin_only)
 
 # ==============================================================================
-# HALAMAN 3: IKLAN & STRATEGI ADS (100% AUTO-PILOT TANPA INPUT MANUAL)
+# HALAMAN 4: IKLAN & STRATEGI ADS (100% AUTO-PILOT TANPA INPUT MANUAL)
 # ==============================================================================
 elif menu_pilihan == "Iklan & Strategi Ads":
     sp_kpi = db['spend_okt_kpi']
@@ -1342,7 +1803,7 @@ elif menu_pilihan == "Iklan & Strategi Ads":
                     <b>🔍 Mengapa CPR Harus Diukur Terhadap Donasi Minimal 99K (Rp 99.000)?</b><br>
                     • Pada donasi 1 mushaf (<b>Rp 99.000</b>), potongan operasional 10% adalah <b>Rp 9.900</b>.<br>
                     • Agar mencapai <b>Standar ROAS Sehat 2,00x</b> (biaya iklan maks 50% = <b>Rp 49.500/closing</b>), maka dengan CR CS <b>{db['avg_cr_okt']:.1f}%</b>, biaya per lead (CPR) tidak boleh melebihi <b>{rp(ap['batas_cpr_sehat_99k'])}</b>.<br>
-                    • Saat ini rata-rata CPR Anda berada di <b>{rp(ap['cpr_aktual'])}/lead</b> (setara <b>{rp(ap['cpa_closing'])}/closing</b>). Jika donatur hanya berdonasi Rp 99.000, maka sisa DSD hanya <b>{rp(99000 - 9900 - ap['cpa_closing'])}</b>.
+                    • Saat ini rata-rata CPR Anda berada di <b>{rp(ap['cpr_aktual'])}/lead</b> (setara <b>{rp(ap['cpa_closing'])}/closing</b>). Jika donatur hanya berdonasi Rp 99.000, maka sisa DSD menjadi negatif/defisit.
                 </div>
                 <div class="sub-box" style="padding:11px 14px;border-radius:12px;font-size:12px;line-height:1.55;">
                     <b>⚡ 3 Langkah Eksekusi Wajib Hari Ini:</b><br>
@@ -1373,7 +1834,7 @@ elif menu_pilihan == "Iklan & Strategi Ads":
     render_saas_table(df_sp_disp)
 
 # ==============================================================================
-# HALAMAN 4: PERFORMA CS & LEADS (LENGKAP DENGAN TABEL KOMPARASI & SUMBER KONTAK)
+# HALAMAN 5: PERFORMA CS & LEADS
 # ==============================================================================
 elif menu_pilihan == "Performa CS & Leads":
     mode_evaluasi_cs = st.radio(
@@ -1494,7 +1955,7 @@ elif menu_pilihan == "Performa CS & Leads":
         render_saas_table(df_ov_disp)
 
 # ==============================================================================
-# HALAMAN 5: LOGISTIK & GUDANG (PEMISAHAN META LP, TIKTOK, TAHSIN & DEFISIT META LP)
+# HALAMAN 6: LOGISTIK & GUDANG (PEMISAHAN META LP, TIKTOK, TAHSIN & DEFISIT META LP)
 # ==============================================================================
 elif menu_pilihan == "Logistik & Gudang":
     render_html('<div class="section-divider"><i class="ri-archive-drawer-line" style="color:#6366F1!important;"></i> 1. PEMISAHAN STOK PER KATEGORI: MUSHAF META LP vs MUSHAF TIKTOK vs BUKU TAHSIN</div>')
@@ -1564,7 +2025,7 @@ elif menu_pilihan == "Logistik & Gudang":
         st.plotly_chart(fig_pk, use_container_width=True)
 
 # ==============================================================================
-# HALAMAN 6: KALENDER DISTRIBUSI
+# HALAMAN 7: KALENDER DISTRIBUSI
 # ==============================================================================
 elif menu_pilihan == "Kalender Distribusi":
     df_kal = db['kalender_okt'].copy()
@@ -1650,7 +2111,7 @@ elif menu_pilihan == "Kalender Distribusi":
     render_saas_table(df_kal_disp)
 
 # ==============================================================================
-# HALAMAN 7: DATABASE & SMART WA BLAST ENGINE
+# HALAMAN 8: DATABASE & SMART WA BLAST ENGINE
 # ==============================================================================
 elif menu_pilihan == "Database & WA Blast":
     df_all_c, is_sample_db = load_lazy_contacts_db(current_sync_token)
